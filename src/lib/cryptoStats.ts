@@ -5,6 +5,7 @@ export type EmojiTier = 'Common' | 'Rare' | 'Epic' | 'Apex';
 export type BehaviorArchetype = 0 | 1 | 2 | 3;
 
 export interface EmojiCombatTrait {
+  emojiKey: string;
   shortcode: string;
   url: string;
   hash: string;
@@ -20,10 +21,11 @@ export interface EmojiCombatTrait {
   source: 'nip30' | 'reserve';
   packTitle?: string;
   packAuthor?: string;
+  packDTag?: string;
   eventId?: string;
 }
 
-const BEHAVIOR_NAMES: readonly [
+export const BEHAVIOR_NAMES: readonly [
   'Swarm Rusher',
   'Zigzag Stalker',
   'Shockwave Brute',
@@ -37,6 +39,36 @@ export function sha256Hex(input: string): string {
 }
 
 /**
+ * Computes a collision-resistant, deterministic identity key for an emoji based on
+ * its source, publisher pubkey, pack identifier, shortcode, and canonical media URL hash.
+ * Prevents different publishers' `:fire:` or `:pepe:` emojis from overwriting one another.
+ */
+export function buildStableEmojiKey(
+  shortcode: string,
+  url: string,
+  source: 'nip30' | 'reserve',
+  meta?: { packAuthor?: string; packDTag?: string }
+): string {
+  const cleanCode = shortcode.trim().toLowerCase();
+  if (source === 'reserve') {
+    return `reserve:${cleanCode}`;
+  }
+  const authorPart =
+    meta?.packAuthor && /^[0-9a-f]{64}$/i.test(meta.packAuthor)
+      ? meta.packAuthor.toLowerCase().slice(0, 16)
+      : 'global';
+  const dPart = (meta?.packDTag ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '')
+    .slice(0, 24);
+  const urlDigest = sha256Hex(url.trim()).slice(0, 10);
+  return dPart
+    ? `nip30:${authorPart}:${dPart}:${cleanCode}:${urlDigest}`
+    : `nip30:${authorPart}:${cleanCode}:${urlDigest}`;
+}
+
+/**
  * Deterministically computes enemy combat traits from `shortcode:imageUrl`
  * using real SHA-256 (`@noble/hashes/sha2.js`), matching NIP.md specification.
  */
@@ -44,7 +76,13 @@ export function deriveEmojiStats(
   shortcode: string,
   url: string,
   source: 'nip30' | 'reserve' = 'nip30',
-  meta?: { packTitle?: string; packAuthor?: string; eventId?: string }
+  meta?: {
+    packTitle?: string;
+    packAuthor?: string;
+    packDTag?: string;
+    eventId?: string;
+    emojiKeyOverride?: string;
+  }
 ): EmojiCombatTrait {
   const hash = sha256Hex(`${shortcode}:${url}`);
   const byte0 = parseInt(hash.slice(0, 2), 16);
@@ -67,7 +105,15 @@ export function deriveEmojiStats(
   else if (powerRating >= 94) tier = 'Epic';
   else if (powerRating >= 76) tier = 'Rare';
 
+  const emojiKey =
+    meta?.emojiKeyOverride ||
+    buildStableEmojiKey(shortcode, url, source, {
+      packAuthor: meta?.packAuthor,
+      packDTag: meta?.packDTag,
+    });
+
   return {
+    emojiKey,
     shortcode,
     url,
     hash,
@@ -83,6 +129,7 @@ export function deriveEmojiStats(
     source,
     packTitle: meta?.packTitle,
     packAuthor: meta?.packAuthor,
+    packDTag: meta?.packDTag,
     eventId: meta?.eventId,
   };
 }

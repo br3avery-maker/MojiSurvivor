@@ -1,6 +1,12 @@
 import { retroAudio } from './audio';
-import type { EmojiCombatTrait } from './cryptoStats';
-import { triggerHaptic, type GameSettings, type UpgradeLevels } from './storage';
+import { sha256Hex, type EmojiCombatTrait } from './cryptoStats';
+import {
+  triggerHaptic,
+  type ActiveRunCheckpoint,
+  type FeaturedEmojiSummary,
+  type GameSettings,
+  type UpgradeLevels,
+} from './storage';
 
 export type WeaponId =
   | 'lightning_zap'
@@ -57,13 +63,27 @@ export interface ArenaHudSnapshot {
 }
 
 export interface CompletedRunSummary {
+  runSessionId: string;
   score: number;
   wave: number;
   defeated: number;
   bossesDefeated: number;
   durationSec: number;
   mojoEarned: number;
+  careerXpEarned: number;
   weaponsSummary: string;
+  strongestSpellName: string;
+  featuredEmoji?: FeaturedEmojiSummary;
+}
+
+export interface RunProgressCheckpointPayload {
+  runSessionId: string;
+  mojoEarnedTotal: number;
+  careerXpEarnedTotal: number;
+  killsTotal: number;
+  waveReached: number;
+  scoreReached: number;
+  completed: boolean;
 }
 
 interface WeaponCatalogItem {
@@ -215,6 +235,7 @@ export interface GameEngineCallbacks {
   onBannerToast: (message: string) => void;
   onLevelUpChoices: (choices: LevelUpChoice[]) => void;
   onEnemyDefeated: (trait: EmojiCombatTrait) => void;
+  onCheckpointProgress: (payload: RunProgressCheckpointPayload) => void;
   onGameOver: (summary: CompletedRunSummary) => void;
 }
 
@@ -269,14 +290,21 @@ export class MojiSurvivorEngine {
   private afterimageTimer = 0;
 
   // Run counters
+  public runSessionId = '';
   private wave = 1;
   private waveTimer = 0;
   private readonly waveDuration = 30;
   private score = 0;
   private mojoEarned = 0;
+  private careerXpEarned = 0;
   private defeated = 0;
   private bossesDefeated = 0;
   private elapsedSec = 0;
+  private featuredEmoji: FeaturedEmojiSummary | undefined = undefined;
+  private checkpointAccumulator = 0;
+  private lastFlushedMojo = -1;
+  private lastFlushedXp = -1;
+  private lastFlushedKills = -1;
 
   // Entities
   private enemies: EnemyEntity[] = [];
@@ -305,7 +333,8 @@ export class MojiSurvivorEngine {
     canvas: HTMLCanvasElement,
     upgrades: UpgradeLevels,
     settings: GameSettings,
-    callbacks: GameEngineCallbacks
+    callbacks: GameEngineCallbacks,
+    initialCheckpoint?: ActiveRunCheckpoint | null
   ) {
     this.canvas = canvas;
     const context = canvas.getContext('2d', { alpha: false });
@@ -317,7 +346,7 @@ export class MojiSurvivorEngine {
     this.settings = settings;
     this.callbacks = callbacks;
 
-    this.initRunState();
+    this.initRunState(initialCheckpoint);
     this.bindInputs();
     this.resizeCanvas();
   }
@@ -326,34 +355,46 @@ export class MojiSurvivorEngine {
     this.settings = next;
   }
 
-  private initRunState(): void {
+  private initRunState(checkpoint?: ActiveRunCheckpoint | null): void {
     const maxHp = 100 + this.upgrades.defense * 18;
+    const restoredWeapons: ActiveWeapon[] =
+      checkpoint && Array.isArray(checkpoint.weapons) && checkpoint.weapons.length > 0
+        ? checkpoint.weapons.map((w) => ({
+            id: w.id,
+            level: w.level,
+            cooldown: w.cooldown,
+            timer: w.cooldown * 0.5,
+            damage: w.damage,
+            range: w.range,
+          }))
+        : [
+            {
+              id: 'lightning_zap',
+              level: 1,
+              cooldown: 1.0,
+              timer: 0.7,
+              damage: 32,
+              range: 310,
+            },
+          ];
+
     this.player = {
       x: this.arenaWidth / 2,
       y: this.arenaHeight / 2,
       radius: 20,
-      hp: maxHp,
+      hp: checkpoint ? Math.max(12, Math.min(maxHp, checkpoint.playerHp)) : maxHp,
       maxHp,
       armorReduction: Math.min(0.45, this.upgrades.defense * 0.04),
       baseSpeed: 215 * (1 + this.upgrades.speed * 0.07),
       regenPerSec: this.upgrades.regen * 0.6,
       pickupRadius: 75 + this.upgrades.magnet * 22,
       damageMultiplier: 1 + this.upgrades.attack * 0.12,
-      level: 1,
-      exp: 0,
-      expNext: 20,
-      invulnTimer: 0,
+      level: checkpoint ? Math.max(1, checkpoint.spellLevel) : 1,
+      exp: checkpoint ? Math.max(0, checkpoint.spellExp) : 0,
+      expNext: checkpoint ? Math.max(20, checkpoint.spellExpNext) : 20,
+      invulnTimer: checkpoint ? 1.2 : 0,
       orbitHitCooldowns: new Map(),
-      weapons: [
-        {
-          id: 'lightning_zap',
-          level: 1,
-          cooldown: 1.0,
-          timer: 0.7,
-          damage: 32,
-          range: 310,
-        },
-      ],
+      weapons: restoredWeapons,
       buffs: {
         speedTimer: 0,
         shieldHits: 0,
@@ -363,13 +404,24 @@ export class MojiSurvivorEngine {
       },
     };
 
-    this.wave = 1;
-    this.waveTimer = 0;
-    this.score = 0;
-    this.mojoEarned = 0;
-    this.defeated = 0;
-    this.bossesDefeated = 0;
-    this.elapsedSec = 0;
+    const randomSalt = Math.random().toString(36).slice(2, 10);
+    this.runSessionId =
+      checkpoint?.runSessionId ||
+      `run_${Date.now()}_${sha256Hex(`${Date.now()}:${randomSalt}`).slice(0, 10)}`;
+    this.wave = checkpoint ? Math.max(1, checkpoint.wave) : 1;
+    this.waveTimer = checkpoint ? Math.max(0, checkpoint.waveTimer) : 0;
+    this.score = checkpoint ? Math.max(0, checkpoint.score) : 0;
+    this.mojoEarned = checkpoint ? Math.max(0, checkpoint.mojoEarned) : 0;
+    this.careerXpEarned = checkpoint ? Math.max(0, checkpoint.careerXpEarned) : 0;
+    this.defeated = checkpoint ? Math.max(0, checkpoint.defeated) : 0;
+    this.bossesDefeated = checkpoint ? Math.max(0, checkpoint.bossesDefeated) : 0;
+    this.elapsedSec = checkpoint ? Math.max(0, checkpoint.elapsedSec) : 0;
+    this.featuredEmoji = checkpoint?.featuredEmoji;
+    this.checkpointAccumulator = 0;
+    this.lastFlushedMojo = this.mojoEarned;
+    this.lastFlushedXp = this.careerXpEarned;
+    this.lastFlushedKills = this.defeated;
+
     this.enemies = [];
     this.projectiles = [];
     this.enemyBullets = [];
@@ -488,9 +540,67 @@ export class MojiSurvivorEngine {
     this.paused = nextPaused;
     this.activePointerId = null;
     this.dragVector = { x: 0, y: 0 };
-    if (!nextPaused) {
+    if (nextPaused) {
+      this.flushCheckpoint(false);
+    } else {
       this.lastTimestamp = performance.now();
     }
+  }
+
+  /**
+   * Immediately flushes any newly earned Mojo, Career XP, kills, and high-water marks
+   * for this `runSessionId` so backgrounding, exiting, or restarting never loses progress.
+   */
+  public flushCheckpoint(completed = false): void {
+    if (
+      !completed &&
+      this.mojoEarned === this.lastFlushedMojo &&
+      this.careerXpEarned === this.lastFlushedXp &&
+      this.defeated === this.lastFlushedKills
+    ) {
+      return;
+    }
+    this.lastFlushedMojo = this.mojoEarned;
+    this.lastFlushedXp = this.careerXpEarned;
+    this.lastFlushedKills = this.defeated;
+    this.callbacks.onCheckpointProgress({
+      runSessionId: this.runSessionId,
+      mojoEarnedTotal: this.mojoEarned,
+      careerXpEarnedTotal: this.careerXpEarned,
+      killsTotal: this.defeated,
+      waveReached: this.wave,
+      scoreReached: this.score,
+      completed,
+    });
+  }
+
+  public exportRunCheckpoint(): ActiveRunCheckpoint | null {
+    if (!this.running || this.player.hp <= 0) return null;
+    return {
+      runSessionId: this.runSessionId,
+      savedAt: Date.now(),
+      wave: this.wave,
+      waveTimer: this.waveTimer,
+      score: this.score,
+      mojoEarned: this.mojoEarned,
+      careerXpEarned: this.careerXpEarned,
+      defeated: this.defeated,
+      bossesDefeated: this.bossesDefeated,
+      elapsedSec: this.elapsedSec,
+      playerHp: Math.round(this.player.hp),
+      playerMaxHp: this.player.maxHp,
+      spellLevel: this.player.level,
+      spellExp: this.player.exp,
+      spellExpNext: this.player.expNext,
+      weapons: this.player.weapons.map((w) => ({
+        id: w.id,
+        level: w.level,
+        cooldown: w.cooldown,
+        damage: w.damage,
+        range: w.range,
+      })),
+      featuredEmoji: this.featuredEmoji,
+    };
   }
 
   public applyLevelUpChoice(choice: LevelUpChoice): void {
@@ -517,6 +627,9 @@ export class MojiSurvivorEngine {
   }
 
   public destroy(): void {
+    if (this.running) {
+      this.flushCheckpoint(false);
+    }
     this.running = false;
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
@@ -557,10 +670,18 @@ export class MojiSurvivorEngine {
   private stepSimulation(dt: number): void {
     this.elapsedSec += dt;
     this.waveTimer += dt;
+    this.checkpointAccumulator += dt;
+
+    if (this.checkpointAccumulator >= 4.0) {
+      this.checkpointAccumulator = 0;
+      this.flushCheckpoint(false);
+    }
 
     if (this.waveTimer >= this.waveDuration) {
       this.waveTimer -= this.waveDuration;
       this.wave += 1;
+      this.careerXpEarned += 20;
+      this.flushCheckpoint(false);
       if (this.wave % 5 === 0) {
         this.spawnApexBoss();
       } else {
@@ -614,7 +735,7 @@ export class MojiSurvivorEngine {
           vx: 0,
           vy: 0,
           radius: this.player.radius - 2,
-          color: '#FF1493',
+          color: '#00F0FF',
           life: 0.24,
           maxLife: 0.24,
         });
@@ -790,7 +911,7 @@ export class MojiSurvivorEngine {
           hitAny = true;
         }
       }
-      if (hitAny && this.settings.flashingEffects) {
+      if (hitAny && this.settings.flashingEffects && !this.settings.reducedMotion) {
         this.shockwaves.push({
           x: this.player.x,
           y: this.player.y,
@@ -798,7 +919,7 @@ export class MojiSurvivorEngine {
           maxRadius: radius,
           life: 0.18,
           maxLife: 0.18,
-          color: 'rgba(255, 20, 147, 0.45)',
+          color: 'rgba(192, 132, 252, 0.55)',
           hitIds: new Set(),
         });
       }
@@ -836,7 +957,7 @@ export class MojiSurvivorEngine {
         life: 0.42,
         maxLife: 0.42,
         playerDamage: weapon.damage * dmgMult,
-        color: '#FF1493',
+        color: '#818CF8',
         hitIds: new Set(),
       });
     }
@@ -953,7 +1074,7 @@ export class MojiSurvivorEngine {
             life: 0.45,
             maxLife: 0.45,
             enemyDamage: e.damage * 0.85,
-            color: '#FF9900',
+            color: '#FF2442',
             hitIds: new Set(),
           });
         }
@@ -1122,7 +1243,7 @@ export class MojiSurvivorEngine {
         vy: -32,
         radius: 0,
         text: String(dmg),
-        color: enemy.isBoss ? '#FF9900' : '#FFFFFF',
+        color: enemy.isBoss || dmg >= 65 ? '#FFD700' : '#F8FAFC',
         life: 0.42,
         maxLife: 0.42,
       });
@@ -1135,13 +1256,30 @@ export class MojiSurvivorEngine {
         this.activeBoss = null;
         this.bossesDefeated += 1;
         this.mojoEarned += 25;
+        this.careerXpEarned += 75;
         this.score += 1200;
         this.callbacks.onBannerToast('Apex Boss Defeated · +25 Mojo');
       }
 
       this.defeated += 1;
+      this.careerXpEarned += Math.max(2, enemy.trait.expValue * 2);
       this.score += Math.round(enemy.trait.powerRating * (enemy.isBoss ? 8 : 1));
+
+      if (!this.featuredEmoji || enemy.trait.powerRating >= this.featuredEmoji.powerRating || enemy.isBoss) {
+        this.featuredEmoji = {
+          emojiKey: enemy.trait.emojiKey,
+          shortcode: enemy.trait.shortcode,
+          url: enemy.trait.url,
+          tier: enemy.trait.tier,
+          powerRating: enemy.trait.powerRating,
+          packTitle: enemy.trait.packTitle,
+        };
+      }
+
       this.callbacks.onEnemyDefeated(enemy.trait);
+      if (enemy.isBoss) {
+        this.flushCheckpoint(false);
+      }
 
       // Drop EXP shard and Mojo bounty
       this.orbs.push({
@@ -1154,15 +1292,17 @@ export class MojiSurvivorEngine {
 
       if (enemy.isBoss || Math.random() < 0.42) {
         this.orbs.push({
-          x: enemy.x + 10,
-          y: enemy.y - 6,
+          x: enemy.x + 12,
+          y: enemy.y - 7,
           kind: 'mojo',
           value: enemy.isBoss ? 12 : enemy.trait.mojoValue,
           magnetized: false,
         });
       }
 
-      const burstCount = this.settings.denseParticles ? (enemy.isBoss ? 26 : 8) : 3;
+      const burstPalette = ['#FF1493', '#00F0FF', '#A855F7', '#00FF9D'];
+      const allowDense = this.settings.denseParticles && !this.settings.reducedMotion;
+      const burstCount = this.settings.reducedMotion ? 2 : allowDense ? (enemy.isBoss ? 26 : 8) : 3;
       for (let k = 0; k < burstCount; k++) {
         const ang = Math.random() * Math.PI * 2;
         const spd = 45 + Math.random() * 110;
@@ -1173,7 +1313,7 @@ export class MojiSurvivorEngine {
           vx: Math.cos(ang) * spd,
           vy: Math.sin(ang) * spd,
           radius: enemy.isBoss ? 3.5 : 2.2,
-          color: k % 2 === 0 ? '#FF1493' : '#00F0FF',
+          color: burstPalette[k % burstPalette.length],
           life: 0.35,
           maxLife: 0.35,
         });
@@ -1190,16 +1330,40 @@ export class MojiSurvivorEngine {
       if (this.player.buffs.shieldHits <= 0) {
         this.player.buffs.shieldTimer = 0;
       }
+      this.particles.push({
+        kind: 'text',
+        x: this.player.x,
+        y: this.player.y - this.player.radius - 8,
+        vx: 0,
+        vy: -28,
+        radius: 0,
+        text: 'BLOCKED',
+        color: '#00FF9D',
+        life: 0.45,
+        maxLife: 0.45,
+      });
       triggerHaptic(18, this.settings.haptics);
       return;
     }
 
     const mitigated = Math.max(1, Math.round(rawDamage * (1 - this.player.armorReduction)));
     this.player.hp = Math.max(0, this.player.hp - mitigated);
+    this.particles.push({
+      kind: 'text',
+      x: this.player.x,
+      y: this.player.y - this.player.radius - 8,
+      vx: 0,
+      vy: -30,
+      radius: 0,
+      text: `-${mitigated}`,
+      color: '#FF2442',
+      life: 0.48,
+      maxLife: 0.48,
+    });
     retroAudio.playHit();
     triggerHaptic(35, this.settings.haptics);
 
-    if (this.settings.screenShake) {
+    if (this.settings.screenShake && !this.settings.reducedMotion) {
       this.shakeTimer = 0.16;
       this.shakeMagnitude = 5;
     }
@@ -1222,6 +1386,7 @@ export class MojiSurvivorEngine {
       this.paused = true;
       this.activePointerId = null;
       this.dragVector = { x: 0, y: 0 };
+      this.flushCheckpoint(false);
       retroAudio.playLevelUp();
       this.emitHud();
       this.callbacks.onLevelUpChoices(this.buildLevelUpChoices());
@@ -1255,18 +1420,31 @@ export class MojiSurvivorEngine {
   private finishRun(): void {
     this.running = false;
     retroAudio.playGameOver();
+    this.flushCheckpoint(true);
+
     const weaponsSummary = this.player.weapons
       .map((w) => `${w.id}:${w.level}`)
       .join(',');
 
+    const topWeapon = [...this.player.weapons].sort(
+      (a, b) => b.level - a.level || b.damage - a.damage
+    )[0];
+    const strongestSpellName = topWeapon
+      ? `${getWeaponDisplayName(topWeapon.id, topWeapon.level)} (Lv.${topWeapon.level})`
+      : 'Lightning Zap (Lv.1)';
+
     this.callbacks.onGameOver({
+      runSessionId: this.runSessionId,
       score: this.score,
       wave: this.wave,
       defeated: this.defeated,
       bossesDefeated: this.bossesDefeated,
       durationSec: Math.max(1, Math.round(this.elapsedSec)),
       mojoEarned: this.mojoEarned,
+      careerXpEarned: this.careerXpEarned,
       weaponsSummary,
+      strongestSpellName,
+      featuredEmoji: this.featuredEmoji,
     });
   }
 
@@ -1317,7 +1495,7 @@ export class MojiSurvivorEngine {
 
     let shakeX = 0;
     let shakeY = 0;
-    if (this.shakeTimer > 0 && this.settings.screenShake) {
+    if (this.shakeTimer > 0 && this.settings.screenShake && !this.settings.reducedMotion) {
       shakeX = (Math.random() - 0.5) * this.shakeMagnitude * 2;
       shakeY = (Math.random() - 0.5) * this.shakeMagnitude * 2;
     }
@@ -1352,65 +1530,119 @@ export class MojiSurvivorEngine {
     ctx.lineWidth = 2;
     ctx.strokeRect(0, 0, this.arenaWidth, this.arenaHeight);
 
-    // Orbs
+    // Pickups: Emerald 4-point XP Gems & Gleaming Gold Mojo Coins (distinct shapes + cool/gold palette)
     for (const orb of this.orbs) {
-      ctx.beginPath();
+      ctx.save();
       if (orb.kind === 'exp') {
-        ctx.fillStyle = '#00F0FF';
-        ctx.arc(orb.x, orb.y, 4.5, 0, Math.PI * 2);
+        // Spring Emerald 4-point crystal gem
+        ctx.fillStyle = '#00FF9D';
+        ctx.strokeStyle = '#059669';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(orb.x, orb.y - 6.5);
+        ctx.lineTo(orb.x + 4.8, orb.y);
+        ctx.lineTo(orb.x, orb.y + 6.5);
+        ctx.lineTo(orb.x - 4.8, orb.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Crisp inner crystal facet
+        ctx.fillStyle = '#D1FAE5';
+        ctx.beginPath();
+        ctx.moveTo(orb.x, orb.y - 3);
+        ctx.lineTo(orb.x + 2, orb.y);
+        ctx.lineTo(orb.x, orb.y + 3);
+        ctx.lineTo(orb.x - 2, orb.y);
+        ctx.closePath();
+        ctx.fill();
       } else {
-        ctx.fillStyle = '#FF9900';
-        ctx.arc(orb.x, orb.y, 6, 0, Math.PI * 2);
+        // Bright Solar Gold Mojo Coin with minted inner ring & vertical bar
+        ctx.fillStyle = '#FFD700';
+        ctx.strokeStyle = '#FEF08A';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(orb.x, orb.y, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.strokeStyle = '#92400E';
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        ctx.arc(orb.x, orb.y, 4.3, 0, Math.PI * 2);
+        ctx.moveTo(orb.x, orb.y - 2.6);
+        ctx.lineTo(orb.x, orb.y + 2.6);
+        ctx.stroke();
       }
-      ctx.fill();
+      ctx.restore();
     }
 
-    // Power-up crates
+    // Power-up crates: 4 distinct color-coded tactical beacons
     for (const c of this.crates) {
       ctx.save();
-      ctx.fillStyle = '#111111';
-      ctx.strokeStyle =
+      const crateColor =
         c.kind === 'speed'
-          ? '#FF1493'
+          ? '#00F0FF'
           : c.kind === 'shield'
-            ? '#00F0FF'
+            ? '#00FF9D'
             : c.kind === 'fury'
-              ? '#FF9900'
-              : '#FFFFFF';
+              ? '#A855F7'
+              : '#FFD700';
+
+      ctx.strokeStyle = crateColor;
+      ctx.globalAlpha = 0.28;
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 19, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#0D0D12';
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.roundRect(c.x - 13, c.y - 13, 26, 26, 6);
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = '600 11px "JetBrains Mono", monospace';
+
+      ctx.fillStyle = crateColor;
+      ctx.font = '700 10px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const code = c.kind === 'speed' ? 'SPD' : c.kind === 'shield' ? 'SHD' : c.kind === 'fury' ? 'FRY' : 'MAG';
+      const code =
+        c.kind === 'speed'
+          ? 'SPD'
+          : c.kind === 'shield'
+            ? 'SHD'
+            : c.kind === 'fury'
+              ? 'FRY'
+              : 'MAG';
       ctx.fillText(code, c.x, c.y + 0.5);
       ctx.restore();
     }
 
-    // Shockwave rings
+    // Shockwave rings (Player Indigo Nova vs Enemy Crimson Hazard)
     for (const sw of this.shockwaves) {
       ctx.save();
       ctx.strokeStyle = sw.color;
-      ctx.lineWidth = 2.5;
-      ctx.globalAlpha = Math.max(0.1, sw.life / sw.maxLife);
+      ctx.lineWidth = sw.enemyDamage ? 3 : 2.5;
+      if (sw.enemyDamage) {
+        ctx.setLineDash([8, 5]);
+      }
+      ctx.globalAlpha = Math.max(0.12, sw.life / sw.maxLife);
       ctx.beginPath();
       ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
 
-    // Player aura & orbiting blades
+    // Player Garlic Aura (Orchid Violet harmonic perimeter)
     const garlic = this.player.weapons.find((w) => w.id === 'garlic_aura');
     if (garlic) {
       const r = garlic.range + garlic.level * 18;
       ctx.save();
-      ctx.fillStyle = 'rgba(255, 20, 147, 0.06)';
-      ctx.strokeStyle = 'rgba(255, 20, 147, 0.28)';
-      ctx.lineWidth = 1.25;
+      ctx.fillStyle = 'rgba(192, 132, 252, 0.07)';
+      ctx.strokeStyle = 'rgba(192, 132, 252, 0.38)';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.arc(this.player.x, this.player.y, r, 0, Math.PI * 2);
       ctx.fill();
@@ -1418,46 +1650,129 @@ export class MojiSurvivorEngine {
       ctx.restore();
     }
 
+    // Player Orbiting Blades (Spinning Emerald-Teal Chakram Diamonds)
     const blades = this.player.weapons.find((w) => w.id === 'orbiting_blades');
     if (blades) {
       const bladeCount = blades.level + 1;
       const spin = performance.now() / 420;
       const orbitRadius = blades.range + blades.level * 6;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.16)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(this.player.x, this.player.y, orbitRadius, 0, Math.PI * 2);
+      ctx.stroke();
+
       for (let b = 0; b < bladeCount; b++) {
         const ang = spin + (b * Math.PI * 2) / bladeCount;
         const bx = this.player.x + Math.cos(ang) * orbitRadius;
         const by = this.player.y + Math.sin(ang) * orbitRadius;
-        ctx.fillStyle = '#00F0FF';
+
+        ctx.save();
+        ctx.translate(bx, by);
+        ctx.rotate(ang * 2.5);
+        ctx.fillStyle = '#10B981';
+        ctx.strokeStyle = '#A7F3D0';
+        ctx.lineWidth = 1.4;
         ctx.beginPath();
-        ctx.arc(bx, by, 7, 0, Math.PI * 2);
+        ctx.moveTo(0, -9);
+        ctx.lineTo(5.5, 0);
+        ctx.lineTo(0, 9);
+        ctx.lineTo(-5.5, 0);
+        ctx.closePath();
         ctx.fill();
+        ctx.stroke();
+        ctx.restore();
       }
+      ctx.restore();
     }
 
-    // Player projectiles
-    ctx.fillStyle = '#FF1493';
+    // Player Plasma Lance Projectiles (Directional Neon Pink + White-Core Laser Bolts)
     for (const p of this.projectiles) {
+      const ang = Math.atan2(p.vy, p.vx);
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(ang);
+      ctx.strokeStyle = '#FF1493';
+      ctx.lineWidth = 6;
+      ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(-9, 0);
+      ctx.lineTo(7, 0);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(-6, 0);
+      ctx.lineTo(7, 0);
+      ctx.stroke();
+      ctx.restore();
     }
 
-    // Enemy projectiles
-    ctx.fillStyle = '#FF9900';
+    // Hostile Enemy Projectiles: High-Danger Crimson Barbed Darts with Trailing Tail
+    // (100% distinct in color AND shape from Gold Mojo Coins & Emerald XP Gems)
     for (const eb of this.enemyBullets) {
+      const ang = Math.atan2(eb.vy, eb.vx);
+      ctx.save();
+      ctx.translate(eb.x, eb.y);
+      ctx.rotate(ang);
+
+      // Crimson danger wake trail
+      ctx.strokeStyle = 'rgba(255, 36, 66, 0.45)';
+      ctx.lineWidth = eb.radius * 1.3;
+      ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.arc(eb.x, eb.y, eb.radius, 0, Math.PI * 2);
+      ctx.moveTo(-eb.radius * 2.8, 0);
+      ctx.lineTo(0, 0);
+      ctx.stroke();
+
+      // Sharp crimson hazard spearhead
+      const r = eb.radius + 2.5;
+      ctx.fillStyle = '#FF2442';
+      ctx.strokeStyle = '#FFCCD5';
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.moveTo(r + 2.5, 0);
+      ctx.lineTo(-r, -r * 0.78);
+      ctx.lineTo(-r * 0.45, 0);
+      ctx.lineTo(-r, r * 0.78);
+      ctx.closePath();
       ctx.fill();
+      ctx.stroke();
+
+      // Hot inner core
+      ctx.fillStyle = '#FFF1F2';
+      ctx.beginPath();
+      ctx.arc(1, 0, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     }
 
-    // Enemies (Live NIP-30 custom emojis + reserve Nostr sprites)
+    // Enemies (Live NIP-30 custom emojis + tier rings + reserve Nostr sprites)
     for (const e of this.enemies) {
       ctx.save();
       if (e.isBoss) {
-        ctx.strokeStyle = '#FF1493';
+        ctx.strokeStyle = '#FF2442';
         ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.arc(e.x, e.y, e.radius + 5, 0, Math.PI * 2);
+        ctx.arc(e.x, e.y, e.radius + 6, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#FF1493';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.radius + 10, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (e.trait.tier === 'Apex' || e.trait.tier === 'Rare') {
+        ctx.strokeStyle =
+          e.trait.tier === 'Apex'
+            ? 'rgba(251, 113, 133, 0.55)'
+            : 'rgba(168, 85, 247, 0.45)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.radius + 3, 0, Math.PI * 2);
         ctx.stroke();
       }
 
@@ -1467,7 +1782,7 @@ export class MojiSurvivorEngine {
         ctx.drawImage(img, e.x - e.radius, e.y - e.radius, size, size);
       } else {
         ctx.fillStyle = '#1A1A1A';
-        ctx.strokeStyle = '#FF1493';
+        ctx.strokeStyle = '#FF2442';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
@@ -1475,8 +1790,8 @@ export class MojiSurvivorEngine {
         ctx.stroke();
       }
 
-      if (e.hitFlash > 0 && this.settings.flashingEffects) {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
+      if (e.hitFlash > 0 && this.settings.flashingEffects && !this.settings.reducedMotion) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.48)';
         ctx.beginPath();
         ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
         ctx.fill();
@@ -1485,33 +1800,33 @@ export class MojiSurvivorEngine {
       if (e.hp < e.maxHp && !e.isBoss) {
         const bw = e.radius * 1.8;
         const pct = Math.max(0, e.hp / e.maxHp);
-        ctx.fillStyle = 'rgba(0,0,0,0.75)';
+        ctx.fillStyle = 'rgba(0,0,0,0.8)';
         ctx.fillRect(e.x - bw / 2, e.y - e.radius - 8, bw, 4);
-        ctx.fillStyle = '#FF1493';
+        ctx.fillStyle = '#FF2442';
         ctx.fillRect(e.x - bw / 2, e.y - e.radius - 8, bw * pct, 4);
       }
       ctx.restore();
     }
 
-    // Player character
+    // Player character & color-matched active buff rings
     ctx.save();
     if (this.player.buffs.shieldHits > 0) {
-      ctx.strokeStyle = '#00F0FF';
+      ctx.strokeStyle = '#00FF9D';
       ctx.lineWidth = 2.5;
       ctx.beginPath();
       ctx.arc(this.player.x, this.player.y, this.player.radius + 7, 0, Math.PI * 2);
       ctx.stroke();
     }
     if (this.player.buffs.furyTimer > 0) {
-      ctx.strokeStyle = '#FF9900';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#A855F7';
+      ctx.lineWidth = 2.2;
       ctx.beginPath();
       ctx.arc(this.player.x, this.player.y, this.player.radius + 4, 0, Math.PI * 2);
       ctx.stroke();
     }
 
     ctx.fillStyle = '#111111';
-    ctx.strokeStyle = '#FF1493';
+    ctx.strokeStyle = '#00F0FF';
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     ctx.arc(this.player.x, this.player.y, this.player.radius, 0, Math.PI * 2);
@@ -1528,32 +1843,42 @@ export class MojiSurvivorEngine {
       ctx.drawImage(avatar, this.player.x - s / 2, this.player.y - s / 2, s, s);
       ctx.restore();
     } else {
-      ctx.fillStyle = '#FF1493';
+      ctx.fillStyle = '#00F0FF';
       ctx.beginPath();
       ctx.arc(this.player.x, this.player.y, 7, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
 
-    // Particles & damage numbers
+    // Particles, electric cyan lightning arcs & floating combat numbers
     for (const p of this.particles) {
       ctx.save();
       const alpha = Math.max(0, p.life / p.maxLife);
       ctx.globalAlpha = alpha;
       if (p.kind === 'text' && p.text) {
         ctx.fillStyle = p.color;
-        ctx.font = '600 12px "JetBrains Mono", monospace';
+        ctx.font = '700 12px "JetBrains Mono", monospace';
         ctx.textAlign = 'center';
         ctx.fillText(p.text, p.x, p.y);
       } else if (p.kind === 'arc' && p.x2 !== undefined && p.y2 !== undefined) {
+        const dx = p.x2 - p.x;
+        const dy = p.y2 - p.y;
+        const m1x = p.x + dx * 0.33 + (Math.random() - 0.5) * 18;
+        const m1y = p.y + dy * 0.33 + (Math.random() - 0.5) * 18;
+        const m2x = p.x + dx * 0.66 + (Math.random() - 0.5) * 18;
+        const m2y = p.y + dy * 0.66 + (Math.random() - 0.5) * 18;
+
         ctx.strokeStyle = p.color;
-        ctx.lineWidth = 2.2;
+        ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(p.x, p.y);
-        const mx = (p.x + p.x2) / 2 + (Math.random() - 0.5) * 18;
-        const my = (p.y + p.y2) / 2 + (Math.random() - 0.5) * 18;
-        ctx.lineTo(mx, my);
+        ctx.lineTo(m1x, m1y);
+        ctx.lineTo(m2x, m2y);
         ctx.lineTo(p.x2, p.y2);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#E0FFFF';
+        ctx.lineWidth = 1.2;
         ctx.stroke();
       } else if (p.kind === 'afterimage') {
         ctx.strokeStyle = p.color;

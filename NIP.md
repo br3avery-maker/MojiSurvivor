@@ -8,12 +8,13 @@ This document defines the Nostr event kinds, tag schemas, cryptographic verifica
 
 - **NIP-01**: Basic protocol flow, BIP-340 Schnorr event verification (`verifyEvent`), and `kind: 0` user profile metadata (`name`, `display_name`, `picture`, `nip05`).
 - **NIP-07**: Browser extension signing via `window.nostr` (`NBrowserSigner`).
+- **NIP-09**: Event Deletion Request (`kind: 5` referencing `e`, `a`, and `k: 30078`) so players can revoke test runs from relays and leaderboards.
 - **NIP-19**: Bech32 encoding/decoding (`npub`, `nsec`, `nevent`, `naddr`).
-- **NIP-30**: Custom Emoji discovery via `kind: 30030` (Emoji Sets) and `kind: 10030` (User Emoji Lists). Every `["emoji", "<shortcode>", "<https-url>"]` tag is sanitized (`https:` allowlist) and deterministically hashed via SHA-256 to derive enemy combat attributes.
-- **NIP-31**: Unknown event fallback via `["alt", "..."]` tag on all published game receipts.
+- **NIP-30**: Custom Emoji discovery via `kind: 30030` (Emoji Sets) and `kind: 10030` (User Emoji Lists), including resolution of `["a", "30030:<pubkey>:<d-tag>"]` set references. Every `["emoji", "<shortcode>", "<https-url>"]` tag is sanitized (`https:` allowlist), assigned a collision-resistant identity (`nip30:<author>:<pack>:<code>:<urlHash>`), and deterministically hashed via SHA-256 to derive enemy combat attributes.
+- **NIP-31**: Unknown event fallback via `["alt", "..."]` tag on all published game receipts and progression saves.
 - **NIP-42**: Automatic client authentication (`kind: 22242`) on relay `AUTH` challenges via `NPool`.
-- **NIP-46**: Nostr Connect / Remote Signing (`bunker://` and `nostrconnect://`) via `NConnectSigner` and `BunkerURI` using NIP-44 encryption.
-- **NIP-55**: Android External Signer (`nostrsigner:` URI intent scheme and optional Android WebView bridge) for Amber (`com.greenart7c3.nostrsigner`).
+- **NIP-46**: Nostr Connect / Remote Signing (`bunker://` and `nostrconnect://`) via `NConnectSigner` and `BunkerURI` using NIP-44 encryption and strict 128-bit CSPRNG secret verification (rejecting generic `"ack"` responses).
+- **NIP-55**: Android External Signer (`nostrsigner:` URI intent primary path) for Amber (`com.greenart7c3.nostrsigner`), binding every returned signed event to the exact `PendingNip55Request` (`requestId`, `expectedPubkey`, `expectedEventHash`, tags, content, and BIP-340 signature) without ever falling back to guest signing.
 
 ---
 
@@ -56,19 +57,34 @@ MojiSurvivor publishes immutable-per-run addressable receipts using `kind: 30078
 }
 ```
 
-### Verification & Anti-Spoofing Rules
-1. **Strict BIP-340 Schnorr Verification**: Every inbound event from any relay MUST pass `verifyEvent(event)` (`nostr-tools`) before entering leaderboard state. Events with malformed hashes or non-Schnorr signatures are dropped.
-2. **Tag-Only Structured Data**: Following MKStack tag design principles, all filterable and structured run metrics live in tags (`score`, `wave`, `defeated`, `bosses`, `duration`, `run_hash`, `weapons`), with `content: ""`.
-3. **Signed vs. Relay-Confirmed Separation**: Local state distinguishes an unsigned run, a signed receipt, a queued offline receipt, and a receipt confirmed via NIP-01 `["OK", <event_id>, true, ""]` responses per relay.
+### Verification & Authorship Rules
+1. **Strict BIP-340 Schnorr Verification**: Every inbound event from any relay MUST pass `verifyEvent(event)` (`nostr-tools`), match `^mojisurvivor:run:\d+:[0-9a-f]{6,64}$`, carry `["t", "mojisurvivor"]`, match `p === pubkey`, and satisfy integer bounds before entering leaderboard state.
+2. **Honest Trust Framing**: Schnorr verification attests cryptographic publisher identity and event integrity across relays (not server-side anti-cheat).
+3. **Signed vs. Relay-Confirmed Separation**: Local state distinguishes `unsigned_local`, `signing`, `signed_local`, `queued_offline`, `publishing`, `confirmed` (real NIP-01 `OK` acceptance), `rejected`, and `failed`.
 
 ---
 
-## 3. Deterministic Emoji Combat Stat Derivation
+## 3. Cross-Device Player Progression Snapshot (`kind: 30078`)
+
+When opted in by the player, MojiSurvivor publishes permanent progression snapshots using a stable addressable identifier:
+
+- `kind`: `30078`
+- `d`: `mojisurvivor:progress:v1`
+- `t`: `mojisurvivor-progress`
+
+### Reconciliation Invariants
+- **Local-First**: All Mojo coins, Career XP, purchased upgrades, and Codex emoji discoveries are persisted locally immediately (across `localStorage`, backup slot, and `AndroidNostrBridge` when present).
+- **No Duplication or Rollback**: Cross-device saves merge idempotently via `creditedRuns` (`runSessionId` ledger), taking max upgrade levels per stat, max kill counts per `emojiKey` (preserving full NIP-30 emoji URL & trait metadata offline), and deriving spendable `mojoBalance` from reconciled `lifetimeMojoEarned - totalSpentOnUpgrades`.
+- **Zero Secrets**: Progression snapshots contain public game progression only — never `nsec` keys, guest keys, or NIP-46 secrets.
+
+---
+
+## 4. Deterministic Emoji Combat Stat Derivation
 
 Given a sanitized NIP-30 custom emoji `shortcode` and `imageUrl`:
 
 ```ts
-const digestHex = bytesToHex(sha256(utf8ToBytes(`${shortcode}:${imageUrl}`)));
+const digestHex = sha256Hex(`${shortcode}:${imageUrl}`);
 ```
 
 - `byte[0]` → Base HP (`20`–`100`)

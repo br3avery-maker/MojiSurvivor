@@ -1,4 +1,12 @@
 import type { NostrEvent } from '@nostrify/nostrify';
+import {
+  deriveEmojiStats,
+  RESERVE_EMOJI_DEFS,
+  type BehaviorArchetype,
+  type EmojiCombatTrait,
+  type EmojiTier,
+} from './cryptoStats';
+import { sanitizeDisplayText, sanitizeRelayUrl, sanitizeShortcode, sanitizeUrl } from './sanitizeUrl';
 
 export interface UpgradeLevels {
   attack: number;
@@ -8,23 +16,57 @@ export interface UpgradeLevels {
   magnet: number;
 }
 
+/**
+ * Self-contained Codex entry persisted locally and across Nostr progression snapshots.
+ * Stores full emoji metadata and deterministic traits so previously defeated emojis
+ * never disappear or lock when offline or before relay NIP-30 packs finish syncing.
+ */
 export interface CodexKillRecord {
+  emojiKey: string;
   shortcode: string;
+  url: string;
   kills: number;
   firstDefeatedAt: number;
+  lastDefeatedAt: number;
   powerRating: number;
+  tier: EmojiTier;
+  hp: number;
+  speed: number;
+  damage: number;
+  behaviorType: BehaviorArchetype;
+  behaviorName: 'Swarm Rusher' | 'Zigzag Stalker' | 'Shockwave Brute' | 'Orbiting Sniper';
+  expValue: number;
+  mojoValue: number;
+  hash: string;
+  source: 'nip30' | 'reserve';
+  packTitle?: string;
+  packAuthor?: string;
+  packDTag?: string;
+  eventId?: string;
 }
 
 export type ReceiptPublishStatus =
   | 'unsigned_local'
   | 'signing'
+  | 'signed_local'
   | 'queued_offline'
   | 'publishing'
   | 'confirmed'
+  | 'rejected'
   | 'failed';
+
+export interface FeaturedEmojiSummary {
+  emojiKey: string;
+  shortcode: string;
+  url: string;
+  tier: EmojiTier;
+  powerRating: number;
+  packTitle?: string;
+}
 
 export interface RunReceiptRecord {
   localId: string;
+  runSessionId?: string;
   runHash: string;
   dTag: string;
   pubkey: string;
@@ -34,7 +76,10 @@ export interface RunReceiptRecord {
   bossesDefeated: number;
   durationSec: number;
   mojoEarned: number;
+  careerXpEarned?: number;
   weaponsSummary: string;
+  strongestSpellName?: string;
+  featuredEmoji?: FeaturedEmojiSummary;
   createdAt: number;
   status: ReceiptPublishStatus;
   signedEvent?: NostrEvent;
@@ -43,6 +88,8 @@ export interface RunReceiptRecord {
   lastError?: string;
 }
 
+export type CodexViewMode = 'gallery' | 'stats';
+
 export interface GameSettings {
   sfx: boolean;
   haptics: boolean;
@@ -50,19 +97,115 @@ export interface GameSettings {
   screenShake: boolean;
   flashingEffects: boolean;
   denseParticles: boolean;
+  reducedMotion: boolean;
+  codexViewMode: CodexViewMode;
+}
+
+/**
+ * Idempotent per-run reward ledger entry.
+ * Prevents duplicate Mojo, XP, or kill credits when checkpointing mid-run,
+ * resuming a paused run, retrying relay broadcast, or reconciling cross-device saves.
+ */
+export interface CreditedRunLedgerEntry {
+  runSessionId: string;
+  mojo: number;
+  careerXp: number;
+  kills: number;
+  wave: number;
+  score: number;
+  completed: boolean;
+  updatedAt: number;
+}
+
+export type ProgressSyncStatus =
+  | 'idle'
+  | 'signing'
+  | 'queued_offline'
+  | 'publishing'
+  | 'confirmed'
+  | 'rejected'
+  | 'failed';
+
+export interface NostrProgressSyncState {
+  enabled: boolean;
+  status: ProgressSyncStatus;
+  dirty: boolean;
+  lastSyncedAt?: number;
+  lastSyncedPubkey?: string;
+  lastEventId?: string;
+  pendingSignedEvent?: NostrEvent;
+  acceptedRelays: string[];
+  rejectedRelays: Record<string, string>;
+  lastError?: string;
 }
 
 export interface PersistedGameState {
+  schemaVersion: number;
+  revision: number;
+  updatedAt: number;
+  ownerPubkey?: string;
+
+  // Permanent currency & career progression (distinct from per-run spell level)
   mojoBalance: number;
+  lifetimeMojoEarned: number;
+  lifetimeXpEarned: number;
+  playerLevel: number;
+  playerXp: number;
+  playerXpNext: number;
+
+  // High-water marks & totals
   highScore: number;
   bestWave: number;
   totalKills: number;
   totalRuns: number;
+
+  // Permanent upgrades, self-contained Codex, receipts, ledger, sync, settings
   upgrades: UpgradeLevels;
   codex: Record<string, CodexKillRecord>;
+  creditedRuns: Record<string, CreditedRunLedgerEntry>;
   localReceipts: RunReceiptRecord[];
+  progressSync: NostrProgressSyncState;
   relays: string[];
   settings: GameSettings;
+}
+
+/**
+ * Mid-run checkpoint saved on pause / app backgrounding so switching to Amber or
+ * another Android app in Web2App does not lose an in-progress Arena session.
+ */
+export interface ActiveRunCheckpoint {
+  runSessionId: string;
+  savedAt: number;
+  wave: number;
+  waveTimer: number;
+  score: number;
+  mojoEarned: number;
+  careerXpEarned: number;
+  defeated: number;
+  bossesDefeated: number;
+  elapsedSec: number;
+  playerHp: number;
+  playerMaxHp: number;
+  spellLevel: number;
+  spellExp: number;
+  spellExpNext: number;
+  weapons: Array<{
+    id: 'lightning_zap' | 'garlic_aura' | 'orbiting_blades' | 'plasma_lance' | 'nova_pulse';
+    level: number;
+    cooldown: number;
+    damage: number;
+    range: number;
+  }>;
+  featuredEmoji?: FeaturedEmojiSummary;
+}
+
+/**
+ * Post-run UI recovery checkpoint so launching external Android signers (`nostrsigner:`)
+ * from the Game Over screen restores the exact Run Complete modal upon return.
+ */
+export interface PendingPostRunSession {
+  savedAt: number;
+  receiptLocalId: string;
 }
 
 export const DEFAULT_RELAYS: string[] = [
@@ -71,103 +214,12 @@ export const DEFAULT_RELAYS: string[] = [
   'wss://relay.primal.net',
 ];
 
-const STORAGE_KEY = 'mojisurvivor_v2_state';
-
-const DEFAULT_STATE: PersistedGameState = {
-  mojoBalance: 0,
-  highScore: 0,
-  bestWave: 1,
-  totalKills: 0,
-  totalRuns: 0,
-  upgrades: {
-    attack: 0,
-    defense: 0,
-    speed: 0,
-    regen: 0,
-    magnet: 0,
-  },
-  codex: {},
-  localReceipts: [],
-  relays: [...DEFAULT_RELAYS],
-  settings: {
-    sfx: true,
-    haptics: true,
-    crtScanlines: false,
-    screenShake: true,
-    flashingEffects: true,
-    denseParticles: true,
-  },
-};
-
-export function loadPersistedState(): PersistedGameState {
-  try {
-    let raw = localStorage.getItem(STORAGE_KEY);
-    const androidBridge = (
-      window as unknown as {
-        AndroidNostrBridge?: { getSavedGameState?: () => string };
-      }
-    ).AndroidNostrBridge;
-    if (!raw && androidBridge?.getSavedGameState) {
-      const nativeSaved = androidBridge.getSavedGameState();
-      if (nativeSaved && nativeSaved.length > 10) {
-        raw = nativeSaved;
-      }
-    }
-    if (!raw) return structuredClone(DEFAULT_STATE);
-    const parsed = JSON.parse(raw) as Partial<PersistedGameState>;
-    return {
-      ...structuredClone(DEFAULT_STATE),
-      ...parsed,
-      upgrades: { ...DEFAULT_STATE.upgrades, ...(parsed.upgrades ?? {}) },
-      settings: { ...DEFAULT_STATE.settings, ...(parsed.settings ?? {}) },
-      relays:
-        Array.isArray(parsed.relays) && parsed.relays.length > 0
-          ? parsed.relays
-          : [...DEFAULT_RELAYS],
-      localReceipts: Array.isArray(parsed.localReceipts) ? parsed.localReceipts : [],
-      codex: parsed.codex && typeof parsed.codex === 'object' ? parsed.codex : {},
-    };
-  } catch {
-    return structuredClone(DEFAULT_STATE);
-  }
-}
-
-export function savePersistedState(state: PersistedGameState): void {
-  try {
-    const serialized = JSON.stringify(state);
-    localStorage.setItem(STORAGE_KEY, serialized);
-    const androidBridge = (
-      window as unknown as {
-        AndroidNostrBridge?: { saveGameState?: (json: string) => void };
-      }
-    ).AndroidNostrBridge;
-    if (androidBridge?.saveGameState) {
-      androidBridge.saveGameState(serialized);
-    }
-  } catch {
-    // Storage quota or private mode fallback
-  }
-}
-
-export function triggerHaptic(ms = 20, enabled = true): void {
-  if (!enabled) return;
-  try {
-    const androidBridge = (
-      window as unknown as {
-        AndroidNostrBridge?: { vibrate?: (durationMs: number) => void };
-      }
-    ).AndroidNostrBridge;
-    if (androidBridge?.vibrate) {
-      androidBridge.vibrate(ms);
-      return;
-    }
-    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-      navigator.vibrate(ms);
-    }
-  } catch {
-    // Ignore unsupported vibration APIs
-  }
-}
+export const CURRENT_SCHEMA_VERSION = 3;
+const STORAGE_KEY_V3 = 'mojisurvivor_v3_state';
+const STORAGE_KEY_V2_LEGACY = 'mojisurvivor_v2_state';
+const STORAGE_KEY_BACKUP = 'mojisurvivor_v3_state_backup';
+const ACTIVE_RUN_STORAGE_KEY = 'mojisurvivor_v3_active_run';
+const PENDING_POST_RUN_KEY = 'mojisurvivor_v3_post_run';
 
 export interface UpgradeSpec {
   key: keyof UpgradeLevels;
@@ -229,4 +281,927 @@ export const UPGRADE_SPECS: readonly UpgradeSpec[] = [
 
 export function getUpgradeCost(spec: UpgradeSpec, currentLevel: number): number {
   return Math.floor(spec.baseCost * Math.pow(spec.costMultiplier, currentLevel));
+}
+
+export function computeTotalMojoSpentOnUpgrades(upgrades: UpgradeLevels): number {
+  let spent = 0;
+  for (const spec of UPGRADE_SPECS) {
+    const clampedLevel = Math.max(0, Math.min(spec.maxLevel, Math.floor(upgrades[spec.key] || 0)));
+    for (let lvl = 0; lvl < clampedLevel; lvl++) {
+      spent += getUpgradeCost(spec, lvl);
+    }
+  }
+  return spent;
+}
+
+/**
+ * Deterministic career progression curve: computes persistent Player Level,
+ * current level XP, and next-level threshold from cumulative `lifetimeXpEarned`.
+ */
+export function derivePlayerCareerProgress(lifetimeXpEarned: number): {
+  playerLevel: number;
+  playerXp: number;
+  playerXpNext: number;
+} {
+  let remaining = Math.max(0, Math.floor(lifetimeXpEarned));
+  let level = 1;
+  let threshold = 100;
+
+  while (remaining >= threshold && level < 999) {
+    remaining -= threshold;
+    level += 1;
+    threshold = Math.floor(100 * Math.pow(1.22, level - 1) + (level - 1) * 25);
+  }
+
+  return {
+    playerLevel: level,
+    playerXp: remaining,
+    playerXpNext: threshold,
+  };
+}
+
+export function traitToCodexRecord(
+  trait: EmojiCombatTrait,
+  kills: number,
+  firstDefeatedAt: number,
+  lastDefeatedAt = firstDefeatedAt
+): CodexKillRecord {
+  return {
+    emojiKey: trait.emojiKey,
+    shortcode: trait.shortcode,
+    url: trait.url,
+    kills: Math.max(1, Math.floor(kills)),
+    firstDefeatedAt,
+    lastDefeatedAt,
+    powerRating: trait.powerRating,
+    tier: trait.tier,
+    hp: trait.hp,
+    speed: trait.speed,
+    damage: trait.damage,
+    behaviorType: trait.behaviorType,
+    behaviorName: trait.behaviorName,
+    expValue: trait.expValue,
+    mojoValue: trait.mojoValue,
+    hash: trait.hash,
+    source: trait.source,
+    packTitle: trait.packTitle,
+    packAuthor: trait.packAuthor,
+    packDTag: trait.packDTag,
+    eventId: trait.eventId,
+  };
+}
+
+export function codexRecordToTrait(rec: CodexKillRecord): EmojiCombatTrait {
+  return deriveEmojiStats(rec.shortcode, rec.url, rec.source, {
+    packTitle: rec.packTitle,
+    packAuthor: rec.packAuthor,
+    packDTag: rec.packDTag,
+    eventId: rec.eventId,
+    emojiKeyOverride: rec.emojiKey,
+  });
+}
+
+function prefersReducedMotionDefault(): boolean {
+  try {
+    return (
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function createDefaultState(): PersistedGameState {
+  const reduced = prefersReducedMotionDefault();
+  return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    revision: 0,
+    updatedAt: 0,
+    mojoBalance: 0,
+    lifetimeMojoEarned: 0,
+    lifetimeXpEarned: 0,
+    playerLevel: 1,
+    playerXp: 0,
+    playerXpNext: 100,
+    highScore: 0,
+    bestWave: 1,
+    totalKills: 0,
+    totalRuns: 0,
+    upgrades: {
+      attack: 0,
+      defense: 0,
+      speed: 0,
+      regen: 0,
+      magnet: 0,
+    },
+    codex: {},
+    creditedRuns: {},
+    localReceipts: [],
+    progressSync: {
+      enabled: false,
+      status: 'idle',
+      dirty: false,
+      acceptedRelays: [],
+      rejectedRelays: {},
+    },
+    relays: [...DEFAULT_RELAYS],
+    settings: {
+      sfx: true,
+      haptics: true,
+      crtScanlines: false,
+      screenShake: !reduced,
+      flashingEffects: !reduced,
+      denseParticles: !reduced,
+      reducedMotion: reduced,
+      codexViewMode: 'stats',
+    },
+  };
+}
+
+function makeFallbackLegacySvg(shortcode: string): string {
+  const label = shortcode.slice(0, 2).toUpperCase();
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="4" y="4" width="56" height="56" rx="16" fill="#180614" stroke="#FF1493" stroke-width="3"/><text x="32" y="38" text-anchor="middle" fill="#FFFFFF" font-family="monospace" font-size="18" font-weight="bold">${label}</text></svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+function sanitizeUpgrades(raw: Partial<UpgradeLevels> | undefined): UpgradeLevels {
+  const clean: UpgradeLevels = {
+    attack: 0,
+    defense: 0,
+    speed: 0,
+    regen: 0,
+    magnet: 0,
+  };
+  if (!raw || typeof raw !== 'object') return clean;
+  for (const spec of UPGRADE_SPECS) {
+    const val = Number(raw[spec.key] ?? 0);
+    if (Number.isFinite(val) && val > 0) {
+      clean[spec.key] = Math.min(spec.maxLevel, Math.floor(val));
+    }
+  }
+  return clean;
+}
+
+/**
+ * Migrates any v1/v2 or v3 JSON payload into a valid v3 `PersistedGameState`
+ * without losing high scores, Mojo, upgrades, receipts, or Codex unlocks.
+ */
+export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | null {
+  if (!rawObj || typeof rawObj !== 'object') return null;
+  const src = rawObj as Record<string, unknown>;
+  const base = createDefaultState();
+
+  const upgrades = sanitizeUpgrades(src.upgrades as Partial<UpgradeLevels> | undefined);
+  const spentOnUpgrades = computeTotalMojoSpentOnUpgrades(upgrades);
+
+  const rawMojoBalance = Math.max(0, Math.floor(Number(src.mojoBalance ?? 0) || 0));
+  const rawHighScore = Math.max(0, Math.floor(Number(src.highScore ?? 0) || 0));
+  const rawBestWave = Math.max(1, Math.floor(Number(src.bestWave ?? 1) || 1));
+  const rawTotalKills = Math.max(0, Math.floor(Number(src.totalKills ?? 0) || 0));
+  const rawTotalRuns = Math.max(0, Math.floor(Number(src.totalRuns ?? 0) || 0));
+
+  // Normalize receipts
+  const localReceipts: RunReceiptRecord[] = [];
+  if (Array.isArray(src.localReceipts)) {
+    for (const item of src.localReceipts.slice(0, 60)) {
+      if (!item || typeof item !== 'object') continue;
+      const r = item as Partial<RunReceiptRecord>;
+      if (!r.localId || !r.dTag) continue;
+      localReceipts.push({
+        localId: String(r.localId),
+        runSessionId: r.runSessionId ? String(r.runSessionId) : String(r.localId),
+        runHash: String(r.runHash ?? ''),
+        dTag: String(r.dTag),
+        pubkey: String(r.pubkey ?? ''),
+        score: Math.max(0, Math.floor(Number(r.score ?? 0) || 0)),
+        wave: Math.max(1, Math.floor(Number(r.wave ?? 1) || 1)),
+        defeated: Math.max(0, Math.floor(Number(r.defeated ?? 0) || 0)),
+        bossesDefeated: Math.max(0, Math.floor(Number(r.bossesDefeated ?? 0) || 0)),
+        durationSec: Math.max(1, Math.floor(Number(r.durationSec ?? 1) || 1)),
+        mojoEarned: Math.max(0, Math.floor(Number(r.mojoEarned ?? 0) || 0)),
+        careerXpEarned:
+          r.careerXpEarned !== undefined
+            ? Math.max(0, Math.floor(Number(r.careerXpEarned) || 0))
+            : undefined,
+        weaponsSummary: String(r.weaponsSummary ?? 'lightning_zap:1'),
+        strongestSpellName: r.strongestSpellName ? String(r.strongestSpellName) : undefined,
+        featuredEmoji: r.featuredEmoji,
+        createdAt: Math.max(0, Math.floor(Number(r.createdAt ?? 0) || 0)),
+        status:
+          r.status === 'signing' || r.status === 'publishing'
+            ? r.signedEvent
+              ? 'signed_local'
+              : 'unsigned_local'
+            : (r.status ?? 'unsigned_local'),
+        signedEvent: r.signedEvent,
+        acceptedRelays: Array.isArray(r.acceptedRelays) ? r.acceptedRelays : [],
+        rejectedRelays:
+          r.rejectedRelays && typeof r.rejectedRelays === 'object' ? r.rejectedRelays : {},
+        lastError: r.lastError ? String(r.lastError) : undefined,
+      });
+    }
+  }
+
+  // Normalize creditedRuns ledger & backfill legacy receipts so old runs cannot re-award Mojo
+  const creditedRuns: Record<string, CreditedRunLedgerEntry> = {};
+  if (src.creditedRuns && typeof src.creditedRuns === 'object') {
+    for (const [k, v] of Object.entries(src.creditedRuns as Record<string, unknown>)) {
+      if (!v || typeof v !== 'object') continue;
+      const entry = v as Partial<CreditedRunLedgerEntry>;
+      const sessionId = String(entry.runSessionId || k);
+      creditedRuns[sessionId] = {
+        runSessionId: sessionId,
+        mojo: Math.max(0, Math.floor(Number(entry.mojo ?? 0) || 0)),
+        careerXp: Math.max(0, Math.floor(Number(entry.careerXp ?? 0) || 0)),
+        kills: Math.max(0, Math.floor(Number(entry.kills ?? 0) || 0)),
+        wave: Math.max(1, Math.floor(Number(entry.wave ?? 1) || 1)),
+        score: Math.max(0, Math.floor(Number(entry.score ?? 0) || 0)),
+        completed: Boolean(entry.completed),
+        updatedAt: Math.max(0, Math.floor(Number(entry.updatedAt ?? 0) || 0)),
+      };
+    }
+  }
+
+  for (const rec of localReceipts) {
+    const sid = rec.runSessionId || rec.localId;
+    if (!creditedRuns[sid]) {
+      const estXp =
+        rec.careerXpEarned ??
+        rec.defeated * 4 + rec.wave * 20 + rec.bossesDefeated * 75;
+      creditedRuns[sid] = {
+        runSessionId: sid,
+        mojo: rec.mojoEarned,
+        careerXp: estXp,
+        kills: rec.defeated,
+        wave: rec.wave,
+        score: rec.score,
+        completed: true,
+        updatedAt: rec.createdAt * 1000,
+      };
+    }
+  }
+
+  const ledgerMojoSum = Object.values(creditedRuns).reduce((acc, r) => acc + r.mojo, 0);
+  const ledgerXpSum = Object.values(creditedRuns).reduce((acc, r) => acc + r.careerXp, 0);
+
+  const lifetimeMojoEarned = Math.max(
+    Math.floor(Number(src.lifetimeMojoEarned ?? 0) || 0),
+    rawMojoBalance + spentOnUpgrades,
+    ledgerMojoSum
+  );
+
+  // Ensure existing saves keep their exact mojoBalance while never dropping below valid floor
+  const mojoBalance =
+    src.schemaVersion === CURRENT_SCHEMA_VERSION
+      ? Math.max(0, lifetimeMojoEarned - spentOnUpgrades)
+      : rawMojoBalance;
+
+  const fallbackLegacyXp = rawTotalKills * 4 + rawTotalRuns * 25 + Math.max(0, rawBestWave - 1) * 30;
+  const lifetimeXpEarned = Math.max(
+    Math.floor(Number(src.lifetimeXpEarned ?? 0) || 0),
+    ledgerXpSum,
+    fallbackLegacyXp
+  );
+  const career = derivePlayerCareerProgress(lifetimeXpEarned);
+
+  // Migrate Codex (supports both v2 shortcode-only records and v3 full metadata records)
+  const reserveByShortcode = new Map(
+    RESERVE_EMOJI_DEFS.map((d) => [d.shortcode, d] as const)
+  );
+  const codex: Record<string, CodexKillRecord> = {};
+  if (src.codex && typeof src.codex === 'object') {
+    for (const [rawKey, rawVal] of Object.entries(src.codex as Record<string, unknown>)) {
+      if (!rawVal || typeof rawVal !== 'object') continue;
+      const entry = rawVal as Partial<CodexKillRecord>;
+      const cleanCode = sanitizeShortcode(entry.shortcode || rawKey);
+      if (!cleanCode) continue;
+      const kills = Math.max(0, Math.floor(Number(entry.kills ?? 0) || 0));
+      if (kills <= 0) continue;
+
+      const reserveDef = reserveByShortcode.get(cleanCode);
+      const validUrl =
+        entry.url && entry.url.startsWith('data:image/svg+xml;')
+          ? entry.url
+          : sanitizeUrl(entry.url) || reserveDef?.url || makeFallbackLegacySvg(cleanCode);
+      const source: 'nip30' | 'reserve' =
+        entry.source === 'reserve' || Boolean(reserveDef && !entry.url) ? 'reserve' : 'nip30';
+
+      const derived = deriveEmojiStats(cleanCode, validUrl, source, {
+        packTitle: sanitizeDisplayText(entry.packTitle || reserveDef?.packTitle, 36),
+        packAuthor:
+          entry.packAuthor && /^[0-9a-f]{64}$/i.test(entry.packAuthor)
+            ? entry.packAuthor.toLowerCase()
+            : undefined,
+        packDTag: entry.packDTag ? sanitizeDisplayText(entry.packDTag, 32) : undefined,
+        eventId:
+          entry.eventId && /^[0-9a-f]{64}$/i.test(entry.eventId)
+            ? entry.eventId.toLowerCase()
+            : undefined,
+        emojiKeyOverride:
+          entry.emojiKey && (entry.emojiKey.startsWith('nip30:') || entry.emojiKey.startsWith('reserve:'))
+            ? entry.emojiKey
+            : undefined,
+      });
+
+      const firstAt = Math.max(1, Math.floor(Number(entry.firstDefeatedAt ?? Date.now()) || Date.now()));
+      const lastAt = Math.max(firstAt, Math.floor(Number(entry.lastDefeatedAt ?? firstAt) || firstAt));
+
+      const existing = codex[derived.emojiKey];
+      if (existing) {
+        existing.kills = Math.max(existing.kills, kills);
+        existing.firstDefeatedAt = Math.min(existing.firstDefeatedAt, firstAt);
+        existing.lastDefeatedAt = Math.max(existing.lastDefeatedAt, lastAt);
+      } else {
+        codex[derived.emojiKey] = traitToCodexRecord(derived, kills, firstAt, lastAt);
+      }
+    }
+  }
+
+  const codexKillsFloor = Object.values(codex).reduce((acc, c) => acc + c.kills, 0);
+
+  // Relays
+  const cleanedRelays = Array.isArray(src.relays)
+    ? Array.from(
+        new Set(
+          src.relays
+            .map((r) => (typeof r === 'string' ? sanitizeRelayUrl(r) : undefined))
+            .filter((r): r is string => Boolean(r))
+        )
+      )
+    : [];
+
+  // Settings
+  const rawSettings = (src.settings ?? {}) as Partial<GameSettings>;
+  const settings: GameSettings = {
+    sfx: typeof rawSettings.sfx === 'boolean' ? rawSettings.sfx : base.settings.sfx,
+    haptics: typeof rawSettings.haptics === 'boolean' ? rawSettings.haptics : base.settings.haptics,
+    crtScanlines:
+      typeof rawSettings.crtScanlines === 'boolean'
+        ? rawSettings.crtScanlines
+        : base.settings.crtScanlines,
+    screenShake:
+      typeof rawSettings.screenShake === 'boolean'
+        ? rawSettings.screenShake
+        : base.settings.screenShake,
+    flashingEffects:
+      typeof rawSettings.flashingEffects === 'boolean'
+        ? rawSettings.flashingEffects
+        : base.settings.flashingEffects,
+    denseParticles:
+      typeof rawSettings.denseParticles === 'boolean'
+        ? rawSettings.denseParticles
+        : base.settings.denseParticles,
+    reducedMotion:
+      typeof rawSettings.reducedMotion === 'boolean'
+        ? rawSettings.reducedMotion
+        : base.settings.reducedMotion,
+    codexViewMode: rawSettings.codexViewMode === 'gallery' ? 'gallery' : 'stats',
+  };
+
+  // Progress Sync
+  const rawSync = (src.progressSync ?? {}) as Partial<NostrProgressSyncState>;
+  const progressSync: NostrProgressSyncState = {
+    enabled: Boolean(rawSync.enabled),
+    status:
+      rawSync.status === 'signing' || rawSync.status === 'publishing'
+        ? rawSync.pendingSignedEvent
+          ? 'queued_offline'
+          : 'idle'
+        : (rawSync.status ?? 'idle'),
+    dirty: Boolean(rawSync.dirty),
+    lastSyncedAt: rawSync.lastSyncedAt ? Number(rawSync.lastSyncedAt) : undefined,
+    lastSyncedPubkey: rawSync.lastSyncedPubkey ? String(rawSync.lastSyncedPubkey) : undefined,
+    lastEventId: rawSync.lastEventId ? String(rawSync.lastEventId) : undefined,
+    pendingSignedEvent: rawSync.pendingSignedEvent,
+    acceptedRelays: Array.isArray(rawSync.acceptedRelays) ? rawSync.acceptedRelays : [],
+    rejectedRelays:
+      rawSync.rejectedRelays && typeof rawSync.rejectedRelays === 'object'
+        ? rawSync.rejectedRelays
+        : {},
+    lastError: rawSync.lastError ? String(rawSync.lastError) : undefined,
+  };
+
+  return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    revision: Math.max(0, Math.floor(Number(src.revision ?? 1) || 1)),
+    updatedAt: Math.max(0, Math.floor(Number(src.updatedAt ?? 0) || 0)),
+    ownerPubkey: typeof src.ownerPubkey === 'string' ? src.ownerPubkey : undefined,
+    mojoBalance,
+    lifetimeMojoEarned: Math.max(lifetimeMojoEarned, mojoBalance + spentOnUpgrades),
+    lifetimeXpEarned,
+    playerLevel: career.playerLevel,
+    playerXp: career.playerXp,
+    playerXpNext: career.playerXpNext,
+    highScore: Math.max(
+      rawHighScore,
+      localReceipts.reduce((m, r) => Math.max(m, r.score), 0)
+    ),
+    bestWave: Math.max(
+      rawBestWave,
+      localReceipts.reduce((m, r) => Math.max(m, r.wave), 1)
+    ),
+    totalKills: Math.max(rawTotalKills, codexKillsFloor),
+    totalRuns: Math.max(rawTotalRuns, localReceipts.length),
+    upgrades,
+    codex,
+    creditedRuns,
+    localReceipts,
+    progressSync,
+    relays: cleanedRelays.length > 0 ? cleanedRelays : [...DEFAULT_RELAYS],
+    settings,
+  };
+}
+
+/**
+ * Deterministically merges two progression states (e.g. local vs Android Web2App native bridge,
+ * or local offline state vs remote Nostr `d: mojisurvivor:progress:v1` snapshot) without:
+ * - duplicating Mojo or XP rewards for already-credited runs
+ * - rolling back purchased upgrades
+ * - losing Codex discoveries or newer offline settings
+ */
+export function reconcileProgressionStates(
+  local: PersistedGameState,
+  incoming: PersistedGameState
+): PersistedGameState {
+  const localIsNewer = (local.updatedAt || 0) >= (incoming.updatedAt || 0);
+  const newer = localIsNewer ? local : incoming;
+
+  const mergedUpgrades: UpgradeLevels = {
+    attack: Math.max(local.upgrades.attack, incoming.upgrades.attack),
+    defense: Math.max(local.upgrades.defense, incoming.upgrades.defense),
+    speed: Math.max(local.upgrades.speed, incoming.upgrades.speed),
+    regen: Math.max(local.upgrades.regen, incoming.upgrades.regen),
+    magnet: Math.max(local.upgrades.magnet, incoming.upgrades.magnet),
+  };
+
+  // Merge idempotent run reward ledger (never double-credits the same runSessionId)
+  const mergedCreditedRuns: Record<string, CreditedRunLedgerEntry> = {
+    ...incoming.creditedRuns,
+  };
+  for (const [sid, locRun] of Object.entries(local.creditedRuns)) {
+    const remRun = mergedCreditedRuns[sid];
+    if (!remRun) {
+      mergedCreditedRuns[sid] = { ...locRun };
+    } else {
+      mergedCreditedRuns[sid] = {
+        runSessionId: sid,
+        mojo: Math.max(locRun.mojo, remRun.mojo),
+        careerXp: Math.max(locRun.careerXp, remRun.careerXp),
+        kills: Math.max(locRun.kills, remRun.kills),
+        wave: Math.max(locRun.wave, remRun.wave),
+        score: Math.max(locRun.score, remRun.score),
+        completed: locRun.completed || remRun.completed,
+        updatedAt: Math.max(locRun.updatedAt, remRun.updatedAt),
+      };
+    }
+  }
+
+  // Merge Codex entries safely without losing metadata or kill counts
+  const mergedCodex: Record<string, CodexKillRecord> = { ...incoming.codex };
+  for (const [key, locEntry] of Object.entries(local.codex)) {
+    const remEntry = mergedCodex[key];
+    if (!remEntry) {
+      mergedCodex[key] = { ...locEntry };
+    } else {
+      const preferMeta =
+        locEntry.source === 'nip30' && remEntry.source !== 'nip30'
+          ? locEntry
+          : remEntry.url.startsWith('https://') && !locEntry.url.startsWith('https://')
+            ? remEntry
+            : locEntry;
+      mergedCodex[key] = {
+        ...preferMeta,
+        kills: Math.max(locEntry.kills, remEntry.kills),
+        firstDefeatedAt: Math.min(locEntry.firstDefeatedAt, remEntry.firstDefeatedAt),
+        lastDefeatedAt: Math.max(locEntry.lastDefeatedAt, remEntry.lastDefeatedAt),
+      };
+    }
+  }
+
+  // Merge local receipts by dTag / localId
+  const receiptByKey = new Map<string, RunReceiptRecord>();
+  for (const r of [...incoming.localReceipts, ...local.localReceipts]) {
+    const key = r.dTag || r.localId;
+    const prev = receiptByKey.get(key);
+    if (!prev) {
+      receiptByKey.set(key, r);
+    } else if (r.status === 'confirmed' && prev.status !== 'confirmed') {
+      receiptByKey.set(key, r);
+    } else if (!prev.signedEvent && r.signedEvent) {
+      receiptByKey.set(key, r);
+    }
+  }
+  const mergedReceipts = Array.from(receiptByKey.values())
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 60);
+
+  // Anti-duplication Mojo & Career XP math
+  const ledgerMojoSum = Object.values(mergedCreditedRuns).reduce((s, r) => s + r.mojo, 0);
+  const ledgerXpSum = Object.values(mergedCreditedRuns).reduce((s, r) => s + r.careerXp, 0);
+
+  // Unaccounted pre-ledger baseline (for legacy v2 saves that had Mojo before runSessionIds existed)
+  const localUnledgeredMojo = Math.max(
+    0,
+    local.lifetimeMojoEarned -
+      Object.values(local.creditedRuns).reduce((s, r) => s + r.mojo, 0)
+  );
+  const incomingUnledgeredMojo = Math.max(
+    0,
+    incoming.lifetimeMojoEarned -
+      Object.values(incoming.creditedRuns).reduce((s, r) => s + r.mojo, 0)
+  );
+  const basePreLedgerMojo = Math.max(localUnledgeredMojo, incomingUnledgeredMojo);
+
+  const lifetimeMojoEarned = Math.max(
+    local.lifetimeMojoEarned,
+    incoming.lifetimeMojoEarned,
+    basePreLedgerMojo + ledgerMojoSum
+  );
+
+  const totalSpent = computeTotalMojoSpentOnUpgrades(mergedUpgrades);
+  const mojoBalance = Math.max(0, lifetimeMojoEarned - totalSpent);
+
+  const localUnledgeredXp = Math.max(
+    0,
+    local.lifetimeXpEarned -
+      Object.values(local.creditedRuns).reduce((s, r) => s + r.careerXp, 0)
+  );
+  const incomingUnledgeredXp = Math.max(
+    0,
+    incoming.lifetimeXpEarned -
+      Object.values(incoming.creditedRuns).reduce((s, r) => s + r.careerXp, 0)
+  );
+  const lifetimeXpEarned = Math.max(
+    local.lifetimeXpEarned,
+    incoming.lifetimeXpEarned,
+    Math.max(localUnledgeredXp, incomingUnledgeredXp) + ledgerXpSum
+  );
+  const career = derivePlayerCareerProgress(lifetimeXpEarned);
+
+  const codexKillsSum = Object.values(mergedCodex).reduce((s, c) => s + c.kills, 0);
+  const completedLedgerRuns = Object.values(mergedCreditedRuns).filter((r) => r.completed).length;
+
+  return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    revision: Math.max(local.revision, incoming.revision) + 1,
+    updatedAt: Date.now(),
+    ownerPubkey: local.ownerPubkey || incoming.ownerPubkey,
+    mojoBalance,
+    lifetimeMojoEarned,
+    lifetimeXpEarned,
+    playerLevel: career.playerLevel,
+    playerXp: career.playerXp,
+    playerXpNext: career.playerXpNext,
+    highScore: Math.max(local.highScore, incoming.highScore),
+    bestWave: Math.max(local.bestWave, incoming.bestWave),
+    totalKills: Math.max(local.totalKills, incoming.totalKills, codexKillsSum),
+    totalRuns: Math.max(
+      local.totalRuns,
+      incoming.totalRuns,
+      completedLedgerRuns,
+      mergedReceipts.length
+    ),
+    upgrades: mergedUpgrades,
+    codex: mergedCodex,
+    creditedRuns: mergedCreditedRuns,
+    localReceipts: mergedReceipts,
+    progressSync: {
+      ...local.progressSync,
+      enabled: local.progressSync.enabled || incoming.progressSync.enabled,
+    },
+    relays: newer.relays.length > 0 ? newer.relays : [...DEFAULT_RELAYS],
+    settings: { ...newer.settings },
+  };
+}
+
+/**
+ * Applies an incremental or final run checkpoint idempotently using `runSessionId`.
+ * Calling this repeatedly with increasing or identical totals for the same `runSessionId`
+ * ONLY credits the delta above what was already banked for that run!
+ */
+export function applyRunCheckpointToState(
+  prev: PersistedGameState,
+  checkpoint: {
+    runSessionId: string;
+    mojoEarnedTotal: number;
+    careerXpEarnedTotal: number;
+    killsTotal: number;
+    waveReached: number;
+    scoreReached: number;
+    completed: boolean;
+  }
+): PersistedGameState {
+  const existing = prev.creditedRuns[checkpoint.runSessionId];
+  const prevMojo = existing?.mojo ?? 0;
+  const prevXp = existing?.careerXp ?? 0;
+  const prevKills = existing?.kills ?? 0;
+  const wasCompleted = existing?.completed ?? false;
+
+  const nextMojo = Math.max(prevMojo, Math.max(0, Math.floor(checkpoint.mojoEarnedTotal)));
+  const nextXp = Math.max(prevXp, Math.max(0, Math.floor(checkpoint.careerXpEarnedTotal)));
+  const nextKills = Math.max(prevKills, Math.max(0, Math.floor(checkpoint.killsTotal)));
+  const nextWave = Math.max(existing?.wave ?? 1, Math.max(1, Math.floor(checkpoint.waveReached)));
+  const nextScore = Math.max(existing?.score ?? 0, Math.max(0, Math.floor(checkpoint.scoreReached)));
+  const nowCompleted = wasCompleted || checkpoint.completed;
+
+  const deltaMojo = nextMojo - prevMojo;
+  const deltaXp = nextXp - prevXp;
+  const deltaKills = nextKills - prevKills;
+  const deltaRuns = !wasCompleted && checkpoint.completed ? 1 : 0;
+
+  if (
+    deltaMojo === 0 &&
+    deltaXp === 0 &&
+    deltaKills === 0 &&
+    deltaRuns === 0 &&
+    nextScore <= prev.highScore &&
+    nextWave <= prev.bestWave &&
+    existing
+  ) {
+    return prev;
+  }
+
+  const nextLifetimeMojo = prev.lifetimeMojoEarned + deltaMojo;
+  const nextMojoBalance = prev.mojoBalance + deltaMojo;
+  const nextLifetimeXp = prev.lifetimeXpEarned + deltaXp;
+  const career = derivePlayerCareerProgress(nextLifetimeXp);
+
+  // Keep creditedRuns bounded to 150 most recent runs while preserving cumulative totals
+  const updatedCredited: Record<string, CreditedRunLedgerEntry> = {
+    ...prev.creditedRuns,
+    [checkpoint.runSessionId]: {
+      runSessionId: checkpoint.runSessionId,
+      mojo: nextMojo,
+      careerXp: nextXp,
+      kills: nextKills,
+      wave: nextWave,
+      score: nextScore,
+      completed: nowCompleted,
+      updatedAt: Date.now(),
+    },
+  };
+
+  const entries = Object.values(updatedCredited);
+  if (entries.length > 150) {
+    entries.sort((a, b) => b.updatedAt - a.updatedAt);
+    const trimmed: Record<string, CreditedRunLedgerEntry> = {};
+    for (const item of entries.slice(0, 150)) {
+      trimmed[item.runSessionId] = item;
+    }
+    return {
+      ...prev,
+      revision: prev.revision + 1,
+      updatedAt: Date.now(),
+      mojoBalance: nextMojoBalance,
+      lifetimeMojoEarned: nextLifetimeMojo,
+      lifetimeXpEarned: nextLifetimeXp,
+      playerLevel: career.playerLevel,
+      playerXp: career.playerXp,
+      playerXpNext: career.playerXpNext,
+      highScore: Math.max(prev.highScore, nextScore),
+      bestWave: Math.max(prev.bestWave, nextWave),
+      totalKills: prev.totalKills + deltaKills,
+      totalRuns: prev.totalRuns + deltaRuns,
+      creditedRuns: trimmed,
+      progressSync: prev.progressSync.enabled
+        ? { ...prev.progressSync, dirty: true }
+        : prev.progressSync,
+    };
+  }
+
+  return {
+    ...prev,
+    revision: prev.revision + 1,
+    updatedAt: Date.now(),
+    mojoBalance: nextMojoBalance,
+    lifetimeMojoEarned: nextLifetimeMojo,
+    lifetimeXpEarned: nextLifetimeXp,
+    playerLevel: career.playerLevel,
+    playerXp: career.playerXp,
+    playerXpNext: career.playerXpNext,
+    highScore: Math.max(prev.highScore, nextScore),
+    bestWave: Math.max(prev.bestWave, nextWave),
+    totalKills: prev.totalKills + deltaKills,
+    totalRuns: prev.totalRuns + deltaRuns,
+    creditedRuns: updatedCredited,
+    progressSync: prev.progressSync.enabled
+      ? { ...prev.progressSync, dirty: true }
+      : prev.progressSync,
+  };
+}
+
+interface AndroidStorageBridge {
+  getSavedGameState?: () => string;
+  saveGameState?: (json: string) => void;
+  vibrate?: (durationMs: number) => void;
+}
+
+function getAndroidBridge(): AndroidStorageBridge | undefined {
+  if (typeof window === 'undefined') return undefined;
+  return (window as unknown as { AndroidNostrBridge?: AndroidStorageBridge }).AndroidNostrBridge;
+}
+
+function tryParseCandidate(raw: string | null | undefined): PersistedGameState | null {
+  if (!raw || raw.length < 2) return null;
+  try {
+    return normalizeAndMigrateState(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Loads and reconciles all available persistence slots (`v3`, `v3_backup`, legacy `v2`,
+ * and Android Web2App native bridge). Never blindly overwrites newer native Web2App progression
+ * with stale browser storage or vice versa.
+ */
+export function loadPersistedStateWithDiagnostics(): {
+  state: PersistedGameState;
+  error: string | null;
+} {
+  const candidates: PersistedGameState[] = [];
+  let readError: string | null = null;
+
+  try {
+    const v3 = tryParseCandidate(localStorage.getItem(STORAGE_KEY_V3));
+    if (v3) candidates.push(v3);
+
+    const backup = tryParseCandidate(localStorage.getItem(STORAGE_KEY_BACKUP));
+    if (backup) candidates.push(backup);
+
+    const legacyV2 = tryParseCandidate(localStorage.getItem(STORAGE_KEY_V2_LEGACY));
+    if (legacyV2) candidates.push(legacyV2);
+  } catch (err) {
+    readError =
+      err instanceof Error
+        ? `Browser storage read warning: ${err.message}`
+        : 'Browser storage unavailable.';
+  }
+
+  try {
+    const bridge = getAndroidBridge();
+    if (bridge?.getSavedGameState) {
+      const nativeCandidate = tryParseCandidate(bridge.getSavedGameState());
+      if (nativeCandidate) {
+        candidates.push(nativeCandidate);
+      }
+    }
+  } catch (err) {
+    readError =
+      err instanceof Error
+        ? `Android storage bridge warning: ${err.message}`
+        : 'Android storage bridge read failed.';
+  }
+
+  if (candidates.length === 0) {
+    return { state: createDefaultState(), error: readError };
+  }
+
+  // Merge all discovered candidates so neither newer Web2App bridge data nor newer localStorage data is lost
+  let merged = candidates[0];
+  for (let i = 1; i < candidates.length; i++) {
+    merged = reconcileProgressionStates(merged, candidates[i]);
+  }
+
+  return { state: merged, error: readError };
+}
+
+export function loadPersistedState(): PersistedGameState {
+  return loadPersistedStateWithDiagnostics().state;
+}
+
+/**
+ * Immediately flushes `PersistedGameState` to primary v3 slot, recovery backup slot,
+ * legacy v2 compatibility key, and Android Web2App native bridge (if available).
+ * Returns `{ ok, error }` so storage failures are explicitly surfaced.
+ */
+export function savePersistedState(state: PersistedGameState): {
+  ok: boolean;
+  error?: string;
+} {
+  const stamped: PersistedGameState = {
+    ...state,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    updatedAt: state.updatedAt > 0 ? state.updatedAt : Date.now(),
+  };
+
+  let serialized = '';
+  try {
+    serialized = JSON.stringify(stamped);
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to serialize game progression.',
+    };
+  }
+
+  let localOk = false;
+  let nativeOk = false;
+  let lastErr: string | undefined;
+
+  try {
+    localStorage.setItem(STORAGE_KEY_V3, serialized);
+    localStorage.setItem(STORAGE_KEY_BACKUP, serialized);
+    // Keep v2 key updated so downgrades or external Web2App inspectors see current highScore & state
+    localStorage.setItem(STORAGE_KEY_V2_LEGACY, serialized);
+    localOk = true;
+  } catch (err) {
+    lastErr =
+      err instanceof Error
+        ? `Storage write error: ${err.message}`
+        : 'Browser localStorage quota exceeded or blocked.';
+  }
+
+  try {
+    const bridge = getAndroidBridge();
+    if (bridge?.saveGameState) {
+      bridge.saveGameState(serialized);
+      nativeOk = true;
+    }
+  } catch (err) {
+    lastErr =
+      err instanceof Error
+        ? `Android bridge write error: ${err.message}`
+        : 'Native Web2App storage write failed.';
+  }
+
+  if (!localOk && !nativeOk) {
+    return { ok: false, error: lastErr || 'Unable to persist game progression.' };
+  }
+  return { ok: true };
+}
+
+export function loadActiveRunCheckpoint(): ActiveRunCheckpoint | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_RUN_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ActiveRunCheckpoint;
+    if (!parsed || typeof parsed !== 'object' || !parsed.runSessionId) return null;
+    // Expire stale checkpoints older than 12 hours
+    if (Date.now() - (parsed.savedAt || 0) > 12 * 60 * 60 * 1000) {
+      localStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function saveActiveRunCheckpoint(checkpoint: ActiveRunCheckpoint | null): void {
+  try {
+    if (!checkpoint) {
+      localStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+    } else {
+      localStorage.setItem(ACTIVE_RUN_STORAGE_KEY, JSON.stringify(checkpoint));
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+export function loadPendingPostRunSession(): PendingPostRunSession | null {
+  try {
+    const raw = localStorage.getItem(PENDING_POST_RUN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingPostRunSession;
+    if (!parsed?.receiptLocalId) return null;
+    if (Date.now() - (parsed.savedAt || 0) > 6 * 60 * 60 * 1000) {
+      localStorage.removeItem(PENDING_POST_RUN_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function savePendingPostRunSession(session: PendingPostRunSession | null): void {
+  try {
+    if (!session) {
+      localStorage.removeItem(PENDING_POST_RUN_KEY);
+    } else {
+      localStorage.setItem(PENDING_POST_RUN_KEY, JSON.stringify(session));
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+export function triggerHaptic(ms = 20, enabled = true): void {
+  if (!enabled) return;
+  try {
+    const bridge = getAndroidBridge();
+    if (bridge?.vibrate) {
+      bridge.vibrate(ms);
+      return;
+    }
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(ms);
+    }
+  } catch {
+    // Ignore unsupported vibration APIs
+  }
 }
