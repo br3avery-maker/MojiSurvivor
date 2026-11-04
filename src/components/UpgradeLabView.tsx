@@ -26,37 +26,37 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
     const ok = onPurchaseUpgrade(spec.key, cost);
     if (ok) {
       setRecentNotice(
-        `Unlocked ${spec.label} Level ${currentLevel + 1} (${spec.formatEffect(currentLevel + 1)}).`
+        `${spec.label} upgraded to Level ${currentLevel + 1} (${spec.formatEffect(currentLevel + 1)}).`
       );
     } else {
-      setRecentNotice(`Insufficient Mojo — requires ${cost} Mojo earned from arena takedowns.`);
+      setRecentNotice(`Need ${cost} Mojo (defeat enemies in Arena to mint Mojo).`);
     }
   };
 
   return (
-    <section className="max-w-5xl mx-auto px-6 py-10">
-      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-8 border-b border-white/10">
+    <section className="max-w-5xl mx-auto px-4 py-3.5 space-y-3">
+      <div className="flex items-center justify-between gap-4 pb-2.5 border-b border-white/10">
         <div>
-          <h1 className="text-3xl font-display font-bold text-white tracking-tight">
+          <h1 className="text-lg sm:text-xl font-display font-bold text-white tracking-tight">
             Mojo Upgrade Lab
           </h1>
-          <p className="text-sm text-[#B8B8B8] mt-1.5 max-w-xl">
-            Spend Mojo minted from verified enemy and Apex Boss takedowns to permanently strengthen hull and weapon systems.
+          <p className="text-xs text-[#B8B8B8]">
+            Permanent hull & spell upgrades funded by arena takedowns
           </p>
         </div>
-        <div className="font-mono tabular-nums text-left sm:text-right">
-          <div className="text-xs text-[#B8B8B8]">Available Mojo</div>
-          <div className="text-2xl font-bold text-[#FF9900]">{mojoBalance.toLocaleString()}</div>
+        <div className="font-mono tabular-nums text-right shrink-0">
+          <div className="text-[11px] text-[#B8B8B8]">Mojo</div>
+          <div className="text-lg font-bold text-[#FF9900]">{mojoBalance.toLocaleString()}</div>
         </div>
       </div>
 
       {recentNotice && (
-        <div className="mt-6 px-4 py-3 rounded-lg bg-[#111111] border border-white/15 text-sm text-white">
+        <div className="px-3 py-2 rounded-lg bg-[#111111] border border-white/15 text-xs text-white">
           {recentNotice}
         </div>
       )}
 
-      <div className="mt-8 divide-y divide-white/10 border-y border-white/10">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
         {UPGRADE_SPECS.map((spec) => {
           const level = upgrades[spec.key];
           const isMaxed = level >= spec.maxLevel;
@@ -66,52 +66,45 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
           return (
             <div
               key={spec.key}
-              className="py-6 flex flex-col md:flex-row md:items-center justify-between gap-6"
+              className="p-3 rounded-xl bg-[#111111] border border-white/10 flex items-center justify-between gap-3"
             >
-              <div className="space-y-1.5 max-w-xl">
-                <div className="flex items-center gap-2.5">
-                  <h2 className="text-lg font-display font-semibold text-white">{spec.label}</h2>
-                  <span className="text-xs font-mono tabular-nums text-[#B8B8B8]">
-                    · Level {level} / {spec.maxLevel}
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <div className="flex items-center gap-1.5">
+                  <h2 className="text-sm font-display font-semibold text-white truncate">
+                    {spec.label}
+                  </h2>
+                  <span className="text-[11px] font-mono tabular-nums text-[#B8B8B8] shrink-0">
+                    · Lvl {level}/{spec.maxLevel}
                   </span>
                 </div>
-                <p className="text-sm text-[#B8B8B8]">{spec.summary}</p>
-                <div className="text-xs font-mono tabular-nums text-white/90 pt-1 flex flex-wrap items-center gap-2">
-                  <span>Current: {spec.formatEffect(level)}</span>
+                <p className="text-[11px] text-[#B8B8B8] line-clamp-1">{spec.summary}</p>
+                <div className="text-[11px] font-mono tabular-nums text-white/90 flex flex-wrap items-center gap-1.5 pt-0.5">
+                  <span>{spec.formatEffect(level)}</span>
                   {!isMaxed && (
                     <>
                       <span aria-hidden="true" className="text-[#B8B8B8]">
                         →
                       </span>
-                      <span className="text-[#FFB6D9]">
-                        Next: {spec.formatEffect(level + 1)}
-                      </span>
+                      <span className="text-[#FFB6D9]">{spec.formatEffect(level + 1)}</span>
                     </>
                   )}
                 </div>
               </div>
 
-              <div className="flex items-center gap-4 shrink-0">
-                {!isMaxed && (
-                  <span className="text-sm font-mono tabular-nums text-[#FF9900]">
-                    {cost.toLocaleString()} Mojo
-                  </span>
-                )}
-                <button
-                  type="button"
-                  disabled={!canAfford}
-                  onClick={() => handleBuy(spec)}
-                  className={`min-h-[42px] px-4 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                    isMaxed
-                      ? 'bg-[#111111] border border-white/10 text-[#B8B8B8] cursor-default'
-                      : canAfford
-                        ? 'bg-[#FF1493] hover:bg-[#CD0D72] text-white'
-                        : 'bg-[#1A1A1A] border border-white/10 text-[#5E5E5E] cursor-not-allowed'
-                  }`}
-                >
-                  {isMaxed ? 'Max Level Reached' : 'Purchase Upgrade'}
-                </button>
-              </div>
+              <button
+                type="button"
+                disabled={!canAfford}
+                onClick={() => handleBuy(spec)}
+                className={`min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-mono font-semibold tabular-nums transition-colors whitespace-nowrap shrink-0 ${
+                  isMaxed
+                    ? 'bg-black border border-white/10 text-[#B8B8B8] cursor-default'
+                    : canAfford
+                      ? 'bg-[#FF1493] hover:bg-[#CD0D72] text-white'
+                      : 'bg-[#1A1A1A] border border-white/10 text-[#888888] cursor-not-allowed'
+                }`}
+              >
+                {isMaxed ? 'Maxed' : `${cost} Mojo`}
+              </button>
             </div>
           );
         })}

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Play } from 'lucide-react';
+import { Play, ChevronRight } from 'lucide-react';
 import { ArenaView } from './components/ArenaView';
 import { CodexView } from './components/CodexView';
 import { IdentitySettingsView } from './components/IdentitySettingsView';
@@ -30,7 +30,6 @@ export default function App() {
   const [nostrTick, setNostrTick] = useState(0);
   const [destination, setDestination] = useState<Destination>('lobby');
 
-  // Subscribe to reactive updates from MojiNostrCoordinator
   useEffect(() => {
     const unsub = coordinator.subscribe(() => {
       setNostrTick((t) => t + 1);
@@ -39,12 +38,10 @@ export default function App() {
     return unsub;
   }, [coordinator]);
 
-  // Persist progression & settings updates
   useEffect(() => {
     savePersistedState(persisted);
   }, [persisted]);
 
-  // Handle Android NIP-55 callback query parameters & automatic offline queue flush
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const nip55Pub = params.get('nip55_pubkey');
@@ -210,8 +207,8 @@ export default function App() {
   );
 
   const activeProfile = coordinator.profiles.get(coordinator.pubkey);
+  const discoveredCount = Object.keys(persisted.codex).length;
 
-  // Full-bleed edge-to-edge Arena Combat takes over the screen with zero website chrome
   if (destination === 'arena') {
     return (
       <ArenaView
@@ -233,26 +230,66 @@ export default function App() {
         <div className="pointer-events-none fixed inset-0 crt-scanlines opacity-30 z-40" />
       )}
 
-      {/* Strict 3-Zone Top Bar Contract */}
-      <header className="flex items-center justify-between gap-8 px-6 py-4 border-b border-white/10 bg-black/95 sticky top-0 z-30">
-        <button
-          type="button"
-          onClick={() => setDestination('lobby')}
-          className="text-lg font-display font-bold tracking-tight text-white hover:text-[#FF1493] transition-colors whitespace-nowrap shrink-0"
-        >
-          MojiSurvivor
-        </button>
+      {/* Compact Sticky Top Chrome (3-Zone Top Bar + Mobile Tab Strip) */}
+      <div className="sticky top-0 z-30 bg-black border-b border-white/10">
+        <header className="max-w-5xl mx-auto flex items-center justify-between gap-8 px-4 py-2">
+          <button
+            type="button"
+            onClick={() => setDestination('lobby')}
+            className="text-base font-display font-bold tracking-tight text-white hover:text-[#FF1493] transition-colors whitespace-nowrap shrink-0"
+          >
+            MojiSurvivor
+          </button>
+
+          <nav
+            aria-label="Primary game navigation"
+            className="hidden md:flex items-center gap-6 text-xs font-medium text-[#B8B8B8]"
+          >
+            {(
+              [
+                ['lobby', 'Lobby'],
+                ['upgrades', 'Upgrades'],
+                ['codex', 'Codex'],
+                ['leaderboard', 'Leaderboard'],
+                ['identity', 'Identity'],
+              ] as const
+            ).map(([dest, label]) => (
+              <button
+                key={dest}
+                type="button"
+                onClick={() => setDestination(dest)}
+                className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+                  destination === dest
+                    ? 'text-white border-[#FF1493]'
+                    : 'border-transparent hover:text-white'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+
+          <div className="flex items-center shrink-0">
+            <button
+              type="button"
+              onClick={() => setDestination('arena')}
+              className="min-h-[34px] px-3.5 py-1.5 rounded-md bg-[#FF1493] hover:bg-[#CD0D72] text-xs font-semibold text-white transition-colors whitespace-nowrap shrink-0"
+            >
+              Start Run
+            </button>
+          </div>
+        </header>
 
         <nav
-          aria-label="Primary game navigation"
-          className="hidden md:flex items-center gap-7 text-sm font-medium text-[#B8B8B8]"
+          aria-label="Mobile navigation"
+          className="md:hidden grid grid-cols-5 border-t border-white/10 bg-[#0A0A0A] px-2"
         >
           {(
             [
               ['lobby', 'Lobby'],
-              ['upgrades', 'Upgrade Lab'],
+              ['upgrades', 'Upgrades'],
               ['codex', 'Codex'],
-              ['leaderboard', 'Leaderboard'],
+              ['leaderboard', 'Ranks'],
               ['identity', 'Identity'],
             ] as const
           ).map(([dest, label]) => (
@@ -260,90 +297,34 @@ export default function App() {
               key={dest}
               type="button"
               onClick={() => setDestination(dest)}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
+              className={`min-h-[36px] text-center text-[11px] font-medium whitespace-nowrap border-b-2 transition-colors ${
                 destination === dest
-                  ? 'text-white border-[#FF1493]'
-                  : 'border-transparent hover:text-white'
+                  ? 'text-white border-[#FF1493] font-semibold'
+                  : 'text-[#B8B8B8] border-transparent hover:text-white'
               }`}
             >
               {label}
             </button>
           ))}
         </nav>
+      </div>
 
-        <div className="flex items-center shrink-0">
-          <button
-            type="button"
-            onClick={() => setDestination('arena')}
-            className="min-h-[40px] px-4 py-2 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] text-xs font-semibold text-white transition-colors whitespace-nowrap shrink-0"
-          >
-            Start Run
-          </button>
-        </div>
-      </header>
-
-      {/* Compact Mobile Navigation Row */}
-      <nav
-        aria-label="Mobile navigation"
-        className="md:hidden flex items-center justify-between gap-2 px-4 py-2.5 border-b border-white/10 bg-[#111111] overflow-x-auto"
-      >
-        {(
-          [
-            ['lobby', 'Lobby'],
-            ['upgrades', 'Upgrades'],
-            ['codex', 'Codex'],
-            ['leaderboard', 'Ranks'],
-            ['identity', 'Identity'],
-          ] as const
-        ).map(([dest, label]) => (
-          <button
-            key={dest}
-            type="button"
-            onClick={() => setDestination(dest)}
-            className={`px-2.5 py-1.5 rounded text-xs font-medium whitespace-nowrap shrink-0 ${
-              destination === dest ? 'text-[#FF1493] font-semibold' : 'text-[#B8B8B8]'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </nav>
-
-      {/* Main Content Area */}
-      <main className="flex-1">
+      {/* Main Content Container — Tight Arcade Density + Safe Bottom Clearance */}
+      <main className="flex-1 pb-16">
         {destination === 'lobby' && (
-          <section className="max-w-6xl mx-auto px-6 py-10 space-y-12">
-            {/* Primary Arcade Lobby Split */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-stretch">
-              <div className="lg:col-span-7 flex flex-col justify-between space-y-6">
-                <div className="space-y-4">
-                  <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-[#FFB6D9]">
-                    <span>NIP-30 Custom Emoji Arena</span>
-                    <span aria-hidden="true">·</span>
-                    <span>BIP-340 Schnorr Receipts</span>
-                    <span aria-hidden="true">·</span>
-                    <span>Nostrify + nostr-tools</span>
-                  </div>
-
-                  <h1
-                    className="font-display font-bold text-white tracking-tight leading-[1.08]"
-                    style={{
-                      fontSize: 'clamp(2.25rem, 4vw, 3.6rem)',
-                      textWrap: 'balance',
-                    }}
-                  >
-                    Survive the rogue custom emojis of Nostr.
-                  </h1>
-
-                  <p className="text-base text-[#B8B8B8] leading-relaxed max-w-xl">
-                    Every <code className="font-mono text-white">kind:30030</code> emoji pack harvested from your relays becomes a deterministic enemy archetype powered by SHA-256. Merge auto-firing spells, defeat Wave-5 Apex Bosses, and sign immutable run receipts to the global leaderboard.
-                  </p>
-                </div>
-
-                {/* Active Persona Inline Strip + Primary Launch */}
-                <div className="pt-2 space-y-5">
-                  <div className="flex items-center gap-3.5">
-                    <div className="w-11 h-11 rounded-full bg-[#111111] border border-[#FF1493] overflow-hidden shrink-0">
+          <section className="max-w-5xl mx-auto px-4 py-3.5 space-y-3">
+            {/* Compact Hero Arena Card */}
+            <div className="relative rounded-xl overflow-hidden border border-white/15 bg-[#111111]">
+              <img
+                src={LOBBY_BACKDROP_URL}
+                alt="Obsidian tactical arena backdrop"
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 w-full h-full object-cover opacity-35"
+              />
+              <div className="relative bg-gradient-to-r from-black/90 via-black/80 to-black/70 p-4 flex flex-col md:flex-row md:items-center justify-between gap-3.5">
+                <div className="space-y-2 max-w-xl">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-full bg-black border border-[#FF1493] overflow-hidden shrink-0">
                       <img
                         src={activeProfile?.picture || DEFAULT_AVATAR_URL}
                         alt="Active player persona"
@@ -360,11 +341,11 @@ export default function App() {
                           activeProfile?.name ||
                           formatShortNpub(coordinator.pubkey)}
                       </div>
-                      <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-[#B8B8B8]">
+                      <div className="flex items-center gap-1.5 text-[11px] font-mono text-[#B8B8B8]">
                         <span>
                           {coordinator.signerMode === 'guest'
-                            ? 'Local secp256k1 Guest Key'
-                            : `Signer: ${coordinator.signerMode.toUpperCase()}`}
+                            ? 'Guest Key'
+                            : coordinator.signerMode.toUpperCase()}
                         </span>
                         <span aria-hidden="true">·</span>
                         <button
@@ -372,121 +353,124 @@ export default function App() {
                           onClick={() => setDestination('identity')}
                           className="text-[#FFB6D9] hover:text-white underline whitespace-nowrap"
                         >
-                          Configure Signer & Relays
+                          Signer & Relays
                         </button>
                       </div>
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setDestination('arena')}
-                      className="min-h-[48px] px-6 py-3 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] text-sm font-semibold text-white transition-colors inline-flex items-center gap-2.5 whitespace-nowrap shrink-0"
+                  <div>
+                    <h1
+                      className="text-xl sm:text-2xl font-display font-bold text-white tracking-tight leading-snug"
+                      style={{ textWrap: 'balance' }}
                     >
-                      <Play className="w-4 h-4 fill-current" />
-                      <span>Enter Battle Arena</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDestination('upgrades')}
-                      className="min-h-[48px] px-5 py-3 rounded-lg bg-[#111111] border border-white/15 hover:border-white/35 text-sm font-semibold text-white transition-colors whitespace-nowrap shrink-0"
-                    >
-                      Mojo Upgrade Lab ({persisted.mojoBalance.toLocaleString()} Mojo)
-                    </button>
+                      NIP-30 Custom Emoji Survivor Arena
+                    </h1>
+                    <p className="text-xs text-[#B8B8B8] mt-0.5 leading-relaxed">
+                      Drag anywhere or use WASD to dodge live <code className="font-mono text-white">kind:30030</code> emojis, merge duplicate spells, and broadcast BIP-340 receipts.
+                    </p>
                   </div>
                 </div>
-              </div>
 
-              {/* Right Tactical Arena Visual Card */}
-              <div className="lg:col-span-5 relative rounded-xl overflow-hidden border border-white/15 bg-[#111111] min-h-[280px]">
-                <img
-                  src={LOBBY_BACKDROP_URL}
-                  alt="Obsidian tactical arena coordinate grid"
-                  referrerPolicy="no-referrer"
-                  className="w-full h-full object-cover"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/45 to-transparent p-6 flex flex-col justify-end">
-                  <div className="text-xs font-mono text-[#FFB6D9] mb-1">
-                    Controls & Spell Evolution
-                  </div>
-                  <p className="text-sm text-white/95 leading-snug">
-                    Touch and drag anywhere on the arena (or use WASD / Arrow keys) to maneuver—no on-screen joystick clutter. Weapons auto-target and duplicate picks evolve up to Tier 3.
-                  </p>
+                <div className="flex sm:flex-row flex-col gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setDestination('arena')}
+                    className="min-h-[44px] px-5 py-2.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] text-sm font-semibold text-white transition-colors inline-flex items-center justify-center gap-2 whitespace-nowrap"
+                  >
+                    <Play className="w-4 h-4 fill-current" />
+                    <span>Enter Battle Arena</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDestination('upgrades')}
+                    className="min-h-[44px] px-4 py-2.5 rounded-lg bg-black/80 border border-white/15 hover:border-white/35 text-xs font-semibold text-white transition-colors whitespace-nowrap"
+                  >
+                    Upgrades ({persisted.mojoBalance.toLocaleString()} Mojo)
+                  </button>
                 </div>
               </div>
             </div>
 
-            {/* Full-Width 4-Column Saved Progression & Relay Sync Strip */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 py-6 border-y border-white/10 font-mono tabular-nums">
+            {/* Compact 4-Metric Strip (Single Row on Mobile & Desktop) */}
+            <div className="grid grid-cols-4 gap-2 py-2.5 px-3 rounded-xl bg-[#111111] border border-white/10 font-mono tabular-nums text-center sm:text-left">
               <div>
-                <div className="text-xs text-[#B8B8B8]">Personal High Score</div>
-                <div className="text-2xl font-bold text-white mt-1">
+                <div className="text-[10px] sm:text-xs text-[#B8B8B8] truncate">Best Score</div>
+                <div className="text-sm sm:text-lg font-bold text-white">
                   {persisted.highScore.toLocaleString()}
                 </div>
               </div>
               <div>
-                <div className="text-xs text-[#B8B8B8]">Highest Wave Reached</div>
-                <div className="text-2xl font-bold text-white mt-1">
-                  Wave {persisted.bestWave}
+                <div className="text-[10px] sm:text-xs text-[#B8B8B8] truncate">Best Wave</div>
+                <div className="text-sm sm:text-lg font-bold text-white">
+                  W{persisted.bestWave}
                 </div>
               </div>
               <div>
-                <div className="text-xs text-[#B8B8B8]">Owned Mojo Balance</div>
-                <div className="text-2xl font-bold text-[#FF9900] mt-1">
+                <div className="text-[10px] sm:text-xs text-[#B8B8B8] truncate">Mojo</div>
+                <div className="text-sm sm:text-lg font-bold text-[#FF9900]">
                   {persisted.mojoBalance.toLocaleString()}
                 </div>
               </div>
               <div>
-                <div className="text-xs text-[#B8B8B8]">NIP-30 Emojis Synced</div>
-                <div className="text-2xl font-bold text-[#00F0FF] mt-1">
-                  {allEmojis.length} ({liveNip30Count} live)
+                <div className="text-[10px] sm:text-xs text-[#B8B8B8] truncate">NIP-30 Pool</div>
+                <div className="text-sm sm:text-lg font-bold text-[#00F0FF]">
+                  {allEmojis.length}
+                  <span className="hidden sm:inline text-xs font-normal text-[#B8B8B8]">
+                    {' '}({liveNip30Count} live)
+                  </span>
                 </div>
               </div>
             </div>
 
-            {/* Quick Destination Directory */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Compact Destination Rows / Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <button
                 type="button"
                 onClick={() => setDestination('codex')}
-                className="text-left p-6 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors space-y-2"
+                className="text-left px-3.5 py-3 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3"
               >
-                <div className="text-xs font-mono text-[#B8B8B8]">01. Bestiary</div>
-                <h2 className="text-lg font-display font-bold text-white">
-                  Emoji Codex ({Object.keys(persisted.codex).length}/{allEmojis.length})
-                </h2>
-                <p className="text-sm text-[#B8B8B8]">
-                  Inspect unlocked NIP-30 custom emojis, SHA-256 derived HP/Speed/Damage stats, and AI archetypes.
-                </p>
+                <div className="min-w-0">
+                  <div className="text-sm font-display font-bold text-white truncate">
+                    Emoji Codex · {discoveredCount}/{allEmojis.length}
+                  </div>
+                  <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
+                    SHA-256 combat traits & unlocked NIP-30 packs
+                  </p>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#B8B8B8] shrink-0" />
               </button>
 
               <button
                 type="button"
                 onClick={() => setDestination('leaderboard')}
-                className="text-left p-6 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors space-y-2"
+                className="text-left px-3.5 py-3 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3"
               >
-                <div className="text-xs font-mono text-[#B8B8B8]">02. Relay Proofs</div>
-                <h2 className="text-lg font-display font-bold text-white">
-                  Global Leaderboard ({sortedLeaderboard.length} runs)
-                </h2>
-                <p className="text-sm text-[#B8B8B8]">
-                  Audit BIP-340 Schnorr-verified Kind 30078 run receipts and manage your offline publish queue.
-                </p>
+                <div className="min-w-0">
+                  <div className="text-sm font-display font-bold text-white truncate">
+                    Leaderboard · {sortedLeaderboard.length} verified
+                  </div>
+                  <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
+                    BIP-340 relay scores & local receipt queue
+                  </p>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#B8B8B8] shrink-0" />
               </button>
 
               <button
                 type="button"
                 onClick={() => setDestination('identity')}
-                className="text-left p-6 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors space-y-2"
+                className="text-left px-3.5 py-3 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3"
               >
-                <div className="text-xs font-mono text-[#B8B8B8]">03. Signers & Relays</div>
-                <h2 className="text-lg font-display font-bold text-white">
-                  NIP-07, NIP-46 & NIP-55
-                </h2>
-                <p className="text-sm text-[#B8B8B8]">
-                  Connect browser extensions, remote bunkers, or Android Amber, and customize sensory comfort.
-                </p>
+                <div className="min-w-0">
+                  <div className="text-sm font-display font-bold text-white truncate">
+                    Identity & Settings
+                  </div>
+                  <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
+                    NIP-07, NIP-46, NIP-55 Amber, relays & audio
+                  </p>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#B8B8B8] shrink-0" />
               </button>
             </div>
           </section>
