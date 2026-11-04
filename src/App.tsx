@@ -2,7 +2,10 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Play, ChevronRight } from 'lucide-react';
 import { ArenaView } from './components/ArenaView';
 import { CodexView } from './components/CodexView';
-import { IdentitySettingsView } from './components/IdentitySettingsView';
+import {
+  IdentitySettingsView,
+  type AccordionPanel,
+} from './components/IdentitySettingsView';
 import { LeaderboardView } from './components/LeaderboardView';
 import { UpgradeLabView } from './components/UpgradeLabView';
 import { sha256Hex, type EmojiCombatTrait } from './lib/cryptoStats';
@@ -29,6 +32,7 @@ export default function App() {
   );
   const [nostrTick, setNostrTick] = useState(0);
   const [destination, setDestination] = useState<Destination>('lobby');
+  const [settingsPanel, setSettingsPanel] = useState<AccordionPanel>('profile');
 
   useEffect(() => {
     const unsub = coordinator.subscribe(() => {
@@ -88,6 +92,11 @@ export default function App() {
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
   }, [coordinator, persisted.localReceipts]);
+
+  const openAccountPanel = useCallback((panel: AccordionPanel = 'profile') => {
+    setSettingsPanel(panel);
+    setDestination('identity');
+  }, []);
 
   const handleEnemyDefeated = useCallback((trait: EmojiCombatTrait) => {
     setPersisted((prev) => {
@@ -208,6 +217,7 @@ export default function App() {
 
   const activeProfile = coordinator.profiles.get(coordinator.pubkey);
   const discoveredCount = Object.keys(persisted.codex).length;
+  const isSignedIn = coordinator.isSignedIn();
 
   if (destination === 'arena') {
     return (
@@ -251,13 +261,15 @@ export default function App() {
                 ['upgrades', 'Upgrades'],
                 ['codex', 'Codex'],
                 ['leaderboard', 'Leaderboard'],
-                ['identity', 'Identity'],
+                ['identity', 'Profile'],
               ] as const
             ).map(([dest, label]) => (
               <button
                 key={dest}
                 type="button"
-                onClick={() => setDestination(dest)}
+                onClick={() =>
+                  dest === 'identity' ? openAccountPanel('profile') : setDestination(dest)
+                }
                 className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
                   destination === dest
                     ? 'text-white border-[#FF1493]'
@@ -290,13 +302,15 @@ export default function App() {
               ['upgrades', 'Upgrades'],
               ['codex', 'Codex'],
               ['leaderboard', 'Ranks'],
-              ['identity', 'Identity'],
+              ['identity', 'Profile'],
             ] as const
           ).map(([dest, label]) => (
             <button
               key={dest}
               type="button"
-              onClick={() => setDestination(dest)}
+              onClick={() =>
+                dest === 'identity' ? openAccountPanel('profile') : setDestination(dest)
+              }
               className={`min-h-[36px] text-center text-[11px] font-medium whitespace-nowrap border-b-2 transition-colors ${
                 destination === dest
                   ? 'text-white border-[#FF1493] font-semibold'
@@ -309,7 +323,7 @@ export default function App() {
         </nav>
       </div>
 
-      {/* Main Content Container — Tight Arcade Density + Safe Bottom Clearance */}
+      {/* Main Content Container */}
       <main className="flex-1 pb-16">
         {destination === 'lobby' && (
           <section className="max-w-5xl mx-auto px-4 py-3.5 space-y-3">
@@ -337,23 +351,23 @@ export default function App() {
                     </div>
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-white truncate">
-                        {activeProfile?.displayName ||
-                          activeProfile?.name ||
-                          formatShortNpub(coordinator.pubkey)}
+                        {isSignedIn
+                          ? activeProfile?.displayName ||
+                            activeProfile?.name ||
+                            formatShortNpub(coordinator.pubkey)
+                          : 'Guest Player'}
                       </div>
                       <div className="flex items-center gap-1.5 text-[11px] font-mono text-[#B8B8B8]">
                         <span>
-                          {coordinator.signerMode === 'guest'
-                            ? 'Guest Key'
-                            : coordinator.signerMode.toUpperCase()}
+                          {isSignedIn ? coordinator.signerMode.toUpperCase() : 'Not signed in'}
                         </span>
                         <span aria-hidden="true">·</span>
                         <button
                           type="button"
-                          onClick={() => setDestination('identity')}
+                          onClick={() => openAccountPanel('profile')}
                           className="text-[#FFB6D9] hover:text-white underline whitespace-nowrap"
                         >
-                          Signer & Relays
+                          {isSignedIn ? 'Manage Profile' : 'Sign In'}
                         </button>
                       </div>
                     </div>
@@ -392,7 +406,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Compact 4-Metric Strip (Single Row on Mobile & Desktop) */}
+            {/* Compact 4-Metric Strip */}
             <div className="grid grid-cols-4 gap-2 py-2.5 px-3 rounded-xl bg-[#111111] border border-white/10 font-mono tabular-nums text-center sm:text-left">
               <div>
                 <div className="text-[10px] sm:text-xs text-[#B8B8B8] truncate">Best Score</div>
@@ -423,7 +437,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Compact Destination Rows / Cards */}
+            {/* Compact Destination Rows */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <button
                 type="button"
@@ -459,15 +473,17 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => setDestination('identity')}
+                onClick={() => openAccountPanel('profile')}
                 className="text-left px-3.5 py-3 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3"
               >
                 <div className="min-w-0">
                   <div className="text-sm font-display font-bold text-white truncate">
-                    Identity & Settings
+                    Profile, Relays & Settings
                   </div>
                   <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
-                    NIP-07, NIP-46, NIP-55 Amber, relays & audio
+                    {isSignedIn
+                      ? `${activeProfile?.displayName || activeProfile?.name || 'Signed in'} · ${persisted.relays.length} relays`
+                      : `Sign in · ${persisted.relays.length} relays · Audio & CRT`}
                   </p>
                 </div>
                 <ChevronRight className="w-4 h-4 text-[#B8B8B8] shrink-0" />
@@ -517,6 +533,7 @@ export default function App() {
             defaultAvatarUrl={DEFAULT_AVATAR_URL}
             relays={persisted.relays}
             settings={persisted.settings}
+            initialPanel={settingsPanel}
             onUpdateRelays={handleUpdateRelays}
             onUpdateSettings={handleUpdateSettings}
           />

@@ -71,6 +71,7 @@ interface StoredAuthSession {
 }
 
 const AUTH_STORAGE_KEY = 'mojisurvivor_v2_auth';
+const GUEST_SK_STORAGE_KEY = 'mojisurvivor_v2_guest_sk';
 const PROFILE_DISCOVERY_RELAYS = ['wss://purplepag.es'];
 
 export function formatShortNpub(pubkeyHex: string): string {
@@ -299,6 +300,30 @@ export class MojiNostrCoordinator {
     } catch {
       // Fall through to fresh secp256k1 guest key
     }
+    this.activateSavedOrFreshGuestKey();
+  }
+
+  private activateSavedOrFreshGuestKey(): void {
+    try {
+      const savedGuestSk = localStorage.getItem(GUEST_SK_STORAGE_KEY);
+      if (savedGuestSk && /^[0-9a-f]{64}$/i.test(savedGuestSk)) {
+        const sk = hexToBytes(savedGuestSk);
+        const pub = getPublicKey(sk);
+        this.guestSecretHex = savedGuestSk;
+        this.pubkey = pub;
+        this.signerMode = 'guest';
+        this.activeSigner = new NSecSigner(sk);
+        this.persistAuth({
+          mode: 'guest',
+          pubkey: pub,
+          secretKeyHex: savedGuestSk,
+        });
+        this.emit();
+        return;
+      }
+    } catch {
+      // Ignore storage error
+    }
     this.generateFreshGuestKey();
   }
 
@@ -310,6 +335,11 @@ export class MojiNostrCoordinator {
     this.pubkey = pub;
     this.signerMode = 'guest';
     this.activeSigner = new NSecSigner(sk);
+    try {
+      localStorage.setItem(GUEST_SK_STORAGE_KEY, skHex);
+    } catch {
+      // Ignore storage error
+    }
     this.persistAuth({
       mode: 'guest',
       pubkey: pub,
@@ -317,6 +347,10 @@ export class MojiNostrCoordinator {
     });
     this.emit();
     void this.fetchProfiles([pub]);
+  }
+
+  public isSignedIn(): boolean {
+    return this.signerMode !== 'guest';
   }
 
   public importNsecKey(nsecOrHex: string): { ok: boolean; error?: string } {
@@ -615,8 +649,23 @@ export class MojiNostrCoordinator {
     return `nostrsigner:${encodedJson}?compressionType=none&returnType=event&type=sign_event&callbackUrl=${callbackUrl}`;
   }
 
+  public logout(): void {
+    try {
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+    } catch {
+      // Ignore storage error
+    }
+    this.activateSavedOrFreshGuestKey();
+  }
+
   public disconnectToGuest(): void {
-    this.generateFreshGuestKey();
+    this.logout();
+  }
+
+  public async refreshActiveProfile(): Promise<void> {
+    if (!this.pubkey) return;
+    this.profiles.delete(this.pubkey);
+    await this.fetchProfiles([this.pubkey]);
   }
 
   private persistAuth(session: StoredAuthSession): void {
