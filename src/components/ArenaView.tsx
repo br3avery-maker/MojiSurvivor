@@ -212,7 +212,8 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
           });
         },
       },
-      checkpointToLoad
+      checkpointToLoad,
+      playerLevel
     );
 
     engineRef.current = engine;
@@ -469,7 +470,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
               type="button"
               onClick={togglePause}
               onPointerDown={(e) => e.stopPropagation()}
-              className="min-h-[40px] px-3 py-1.5 rounded-lg bg-[#111111]/90 border border-white/15 text-xs font-semibold text-white hover:border-[#FF1493] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              className="min-h-[40px] px-3 py-1.5 rounded-lg bg-[#111111]/95 border border-[#9A0957] text-xs font-semibold text-white hover:border-[#FF1493] transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
             >
               <Pause className="w-3.5 h-3.5 text-[#FF1493]" />
               <span>Pause</span>
@@ -532,10 +533,10 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
       {/* Per-Run Spell Level-Up & Merging Modal */}
       {levelChoices && (
         <div
-          className="absolute inset-0 z-30 bg-black/80 flex items-center justify-center p-3"
+          className="absolute inset-0 z-30 bg-black/85 flex items-center justify-center p-3"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <div className="w-full max-w-md rounded-xl bg-[#111111] border border-white/15 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-[#111111] border-2 border-[#FF1493] p-4 shadow-2xl">
             <div className="flex items-baseline justify-between gap-2 mb-1">
               <h2 className="text-lg font-display font-bold text-white">
                 Spell Level {hud.level} Pick
@@ -558,7 +559,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
                     setLevelChoices(null);
                     engineRef.current?.applyLevelUpChoice(choice);
                   }}
-                  className="w-full text-left p-3 rounded-lg bg-[#1A1A1A] border border-white/10 hover:border-[#FF1493] transition-colors"
+                  className="w-full text-left p-3 rounded-xl bg-[#1A1A1A] border border-[#9A0957]/60 hover:border-[#FF1493] transition-colors"
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-display text-sm font-bold text-white">
@@ -569,7 +570,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-[#B8B8B8] mt-0.5">{choice.description}</p>
-                  <div className="text-[11px] font-mono tabular-nums text-white/80 mt-1 flex items-center gap-2">
+                  <div className="text-[11px] font-mono tabular-nums text-[#FFB6D9] mt-1 flex items-center gap-2">
                     <span>DMG {choice.projectedDamage}</span>
                     <span aria-hidden="true">·</span>
                     <span>CD {choice.projectedCooldown}s</span>
@@ -584,20 +585,20 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
       {/* Pause Modal */}
       {isPaused && !levelChoices && !completedSummary && (
         <div
-          className="absolute inset-0 z-30 bg-black/80 flex items-center justify-center p-3"
+          className="absolute inset-0 z-30 bg-black/85 flex items-center justify-center p-3"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <div className="w-full max-w-xs rounded-xl bg-[#111111] border border-white/15 p-4">
+          <div className="w-full max-w-xs rounded-2xl bg-[#111111] border-2 border-[#FF1493] p-4 shadow-2xl">
             <h2 className="text-lg font-display font-bold text-white">Run Paused</h2>
             <p className="text-xs text-[#B8B8B8] mb-1 font-mono tabular-nums">
               Wave {hud.wave} · {hud.score.toLocaleString()} pts · +{hud.mojoEarned} Mojo
             </p>
-            <p className="text-[11px] text-emerald-300/90 mb-3">
-              Collected Mojo & Career XP are safely checkpointed.
+            <p className="text-[11px] text-[#FFB6D9] mb-3">
+              Collected Mojo &amp; Career XP are safely checkpointed.
             </p>
 
             {hud.weapons.length > 0 && (
-              <div className="mb-3.5 pt-2.5 border-t border-white/10 space-y-1 text-xs font-mono tabular-nums text-white">
+              <div className="mb-3.5 pt-2.5 border-t border-[#5B0633] space-y-1 text-xs font-mono tabular-nums text-white">
                 {hud.weapons.map((w) => (
                   <div key={w.id} className="flex justify-between">
                     <span>{w.name}</span>
@@ -611,25 +612,36 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
               <button
                 type="button"
                 onClick={togglePause}
-                className="min-h-[42px] px-4 py-2 rounded-lg bg-[#FF1493] text-white text-xs font-semibold hover:bg-[#CD0D72] transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
+                className="min-h-[42px] px-4 py-2 rounded-xl bg-[#FF1493] text-white text-xs font-semibold hover:bg-[#CD0D72] transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
               >
                 <Play className="w-3.5 h-3.5" />
                 <span>Resume Run</span>
               </button>
               <button
                 type="button"
-                onClick={handleRestart}
-                className="min-h-[42px] px-4 py-2 rounded-lg bg-[#1A1A1A] border border-white/15 text-white text-xs font-semibold hover:border-white/35 transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
+                onClick={() => {
+                  setIsPaused(false);
+                  engineRef.current?.finishRun();
+                }}
+                className="min-h-[42px] px-4 py-2 rounded-xl bg-[#1A1A1A] border border-[#FF1493] text-white text-xs font-semibold hover:bg-[#5B0633]/60 transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
+                <Send className="w-3.5 h-3.5 text-[#FFB6D9]" />
+                <span>End Run &amp; Submit Score</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleRestart}
+                className="min-h-[42px] px-4 py-2 rounded-xl bg-[#000000] border border-[#9A0957] text-white text-xs font-semibold hover:border-[#FF1493] transition-colors flex items-center justify-center gap-2 whitespace-nowrap"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-[#FFB6D9]" />
                 <span>Restart Fresh Run</span>
               </button>
               <button
                 type="button"
                 onClick={handlePauseSaveAndExit}
-                className="min-h-[40px] px-4 py-1.5 rounded-lg text-[#B8B8B8] hover:text-white text-xs font-medium transition-colors whitespace-nowrap"
+                className="min-h-[40px] px-4 py-1.5 rounded-xl text-[#B8B8B8] hover:text-white text-xs font-medium transition-colors whitespace-nowrap"
               >
-                Save Checkpoint & Exit to Lobby
+                Save Checkpoint &amp; Exit to Lobby
               </button>
             </div>
           </div>
@@ -642,7 +654,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
           className="absolute inset-0 z-30 bg-black/85 flex items-center justify-center p-3 overflow-y-auto"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          <div className="w-full max-w-lg rounded-xl bg-[#111111] border border-white/15 p-4 my-auto space-y-3">
+          <div className="w-full max-w-lg rounded-2xl bg-[#111111] border-2 border-[#FF1493] p-4 my-auto space-y-3 shadow-2xl">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="text-xl font-display font-bold text-white">Run Complete</h2>

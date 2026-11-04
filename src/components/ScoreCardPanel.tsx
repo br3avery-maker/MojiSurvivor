@@ -174,7 +174,7 @@ export const ScoreCardPanel: React.FC<ScoreCardPanelProps> = ({
   };
 
   return (
-    <div className="rounded-xl bg-[#0D0D12] border border-[#FF1493]/40 p-3.5 space-y-3">
+    <div className="rounded-xl bg-[#111111] border border-[#9A0957]/60 p-3.5 space-y-3">
       <div className="flex items-center justify-between gap-2">
         <div>
           <h3 className="text-sm font-display font-bold text-white">
@@ -189,7 +189,7 @@ export const ScoreCardPanel: React.FC<ScoreCardPanelProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Close score card"
-            className="min-h-[36px] min-w-[36px] rounded-lg bg-black border border-white/15 text-[#B8B8B8] hover:text-white flex items-center justify-center"
+            className="min-h-[36px] min-w-[36px] rounded-lg bg-[#000000] border border-[#9A0957]/60 text-[#B8B8B8] hover:text-white flex items-center justify-center"
           >
             <X className="w-4 h-4" />
           </button>
@@ -197,7 +197,7 @@ export const ScoreCardPanel: React.FC<ScoreCardPanelProps> = ({
       </div>
 
       {/* Rendered PNG Image Preview */}
-      <div className="rounded-lg bg-black border border-white/10 p-2 flex items-center justify-center min-h-[220px]">
+      <div className="rounded-lg bg-[#000000] border border-[#5B0633] p-2 flex items-center justify-center min-h-[220px]">
         {generating ? (
           <span className="text-xs font-mono text-[#B8B8B8]">
             Rendering PNG arcade receipt…
@@ -206,23 +206,23 @@ export const ScoreCardPanel: React.FC<ScoreCardPanelProps> = ({
           <img
             src={card.dataUrl}
             alt="MojiSurvivor downloadable arcade score card"
-            className="w-full max-w-[300px] h-auto rounded-md border border-white/10"
+            className="w-full max-w-[300px] h-auto rounded-md border border-[#9A0957]/50"
           />
         ) : (
-          <span className="text-xs text-amber-300">
+          <span className="text-xs text-[#FFB6D9]">
             {errorMsg || 'Score card unavailable.'}
           </span>
         )}
       </div>
 
       {feedback && (
-        <div className="px-3 py-2 rounded-lg bg-black border border-emerald-500/40 text-xs text-emerald-300">
+        <div className="px-3 py-2 rounded-lg bg-[#000000] border border-[#FF1493]/50 text-xs text-[#FFB6D9]">
           {feedback}
         </div>
       )}
 
       {errorMsg && (
-        <div className="px-3 py-2 rounded-lg bg-black border border-amber-500/40 text-xs text-amber-300">
+        <div className="px-3 py-2 rounded-lg bg-[#000000] border border-[#9A0957] text-xs text-[#FFB6D9]">
           {errorMsg}
         </div>
       )}
@@ -243,9 +243,9 @@ export const ScoreCardPanel: React.FC<ScoreCardPanelProps> = ({
           type="button"
           disabled={!card}
           onClick={handleDownload}
-          className="min-h-[40px] px-3 py-2 rounded-lg bg-[#1A1A1A] border border-white/15 hover:border-white/35 disabled:opacity-50 text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+          className="min-h-[40px] px-3 py-2 rounded-lg bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] disabled:opacity-50 text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
         >
-          <Download className="w-3.5 h-3.5 text-[#00F0FF]" />
+          <Download className="w-3.5 h-3.5 text-[#FFB6D9]" />
           <span>Download</span>
         </button>
 
@@ -253,12 +253,12 @@ export const ScoreCardPanel: React.FC<ScoreCardPanelProps> = ({
           type="button"
           disabled={!card}
           onClick={() => void handleCopySummary()}
-          className="min-h-[40px] px-3 py-2 rounded-lg bg-[#1A1A1A] border border-white/15 hover:border-white/35 disabled:opacity-50 text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+          className="min-h-[40px] px-3 py-2 rounded-lg bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] disabled:opacity-50 text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
         >
           {copiedText ? (
-            <Check className="w-3.5 h-3.5 text-emerald-400" />
+            <Check className="w-3.5 h-3.5 text-[#FF1493]" />
           ) : (
-            <Copy className="w-3.5 h-3.5" />
+            <Copy className="w-3.5 h-3.5 text-[#C0C0C0]" />
           )}
           <span>{copiedText ? 'Copied' : 'Copy Text'}</span>
         </button>
@@ -267,7 +267,7 @@ export const ScoreCardPanel: React.FC<ScoreCardPanelProps> = ({
           type="button"
           disabled={!card}
           onClick={handleOpenComposer}
-          className="min-h-[40px] px-3 py-2 rounded-lg bg-[#1A1A1A] border border-white/15 hover:border-[#FF1493] disabled:opacity-50 text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+          className="min-h-[40px] px-3 py-2 rounded-lg bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] disabled:opacity-50 text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
         >
           <Send className="w-3.5 h-3.5 text-[#FFB6D9]" />
           <span>Post Note</span>

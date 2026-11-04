@@ -1,5 +1,6 @@
 import { retroAudio } from './audio';
 import { sha256Hex, type EmojiCombatTrait } from './cryptoStats';
+import { getArenaPixelTileCanvas } from './pixelBackgrounds';
 import {
   triggerHaptic,
   type ActiveRunCheckpoint,
@@ -99,44 +100,75 @@ export const WEAPON_CATALOG: readonly WeaponCatalogItem[] = [
   {
     id: 'lightning_zap',
     tiers: ['Lightning Zap', 'Double Spark', 'Chain Storm'],
-    baseDamage: 32,
-    baseCooldown: 1.05,
-    range: 310,
-    description: 'Strikes nearest rogue emojis with high-voltage arcs.',
+    baseDamage: 28,
+    baseCooldown: 0.78,
+    range: 210,
+    description: 'Strikes close rogue emojis and chains secondary arcs on merge.',
   },
   {
     id: 'garlic_aura',
     tiers: ['Holy Garlic', 'Radiant Ward', 'Solar Cleansing'],
     baseDamage: 18,
-    baseCooldown: 0.55,
-    range: 96,
-    description: 'Pulses a persistent perimeter field that sears close swarmers.',
+    baseCooldown: 0.58,
+    range: 88,
+    description: 'Pulses a close-quarters ward that damages and repels swarmers.',
   },
   {
     id: 'orbiting_blades',
     tiers: ['Orbiting Blades', 'Twin Chakrams', 'Vortex Ring'],
     baseDamage: 24,
-    baseCooldown: 0.2,
-    range: 74,
+    baseCooldown: 0.42,
+    range: 76,
     description: 'Maintains revolving energy satellites that slice colliding foes.',
   },
   {
     id: 'plasma_lance',
     tiers: ['Plasma Lance', 'Twin Railgun', 'Hyper Piercer'],
-    baseDamage: 46,
-    baseCooldown: 1.25,
-    range: 460,
+    baseDamage: 42,
+    baseCooldown: 0.92,
+    range: 280,
     description: 'Fires armor-piercing bolts straight through dense enemy lines.',
   },
   {
     id: 'nova_pulse',
     tiers: ['Nova Pulse', 'Supernova Wave', 'Singularity Blast'],
-    baseDamage: 62,
-    baseCooldown: 2.6,
-    range: 250,
-    description: 'Detonates an expanding shockwave ring clearing surrounding waves.',
+    baseDamage: 46,
+    baseCooldown: 1.85,
+    range: 175,
+    description: 'Detonates an expanding shockwave ring that blasts nearby waves.',
   },
 ];
+
+const WEAPON_MIN_COOLDOWN: Record<WeaponId, number> = {
+  lightning_zap: 0.42,
+  garlic_aura: 0.36,
+  orbiting_blades: 0.26,
+  plasma_lance: 0.52,
+  nova_pulse: 1.15,
+};
+
+export function computeWeaponStatsForLevel(
+  id: WeaponId,
+  level: number
+): { damage: number; cooldown: number; range: number } {
+  const def = WEAPON_CATALOG.find((w) => w.id === id) ?? WEAPON_CATALOG[0];
+  const lvl = Math.max(1, level);
+  const minCd = WEAPON_MIN_COOLDOWN[id] ?? 0.4;
+  // Strong early merges (Lv.2 = +26%, Lv.3 = +54%) with controlled overdrive scaling at Lv.4+
+  const scaleMult =
+    lvl === 1
+      ? 1.0
+      : lvl === 2
+        ? 1.26
+        : lvl === 3
+          ? 1.54
+          : 1.54 + (lvl - 3) * 0.22;
+  const damage = Math.round(def.baseDamage * scaleMult);
+  const cooldown = Number(
+    Math.max(minCd, def.baseCooldown * Math.pow(0.93, Math.min(6, lvl - 1))).toFixed(2)
+  );
+  return { damage, cooldown, range: def.range };
+}
 
 export function getWeaponDisplayName(id: WeaponId, level: number): string {
   const def = WEAPON_CATALOG.find((w) => w.id === id);
@@ -157,9 +189,11 @@ interface EnemyEntity {
   damage: number;
   radius: number;
   isBoss: boolean;
+  isElite: boolean;
   phaseAngle: number;
   actionTimer: number;
   hitFlash: number;
+  knockbackCooldown: number;
 }
 
 interface ProjectileEntity {
@@ -212,6 +246,15 @@ interface ShockwaveRing {
   hitIds: Set<number>;
 }
 
+interface HazardZone {
+  x: number;
+  y: number;
+  radius: number;
+  fuse: number;
+  maxFuse: number;
+  damage: number;
+}
+
 interface VisualParticle {
   kind: 'spark' | 'text' | 'arc' | 'afterimage';
   x: number;
@@ -250,6 +293,7 @@ export class MojiSurvivorEngine {
   private callbacks: GameEngineCallbacks;
   private upgrades: UpgradeLevels;
   private settings: GameSettings;
+  private careerPlayerLevel = 1;
 
   private arenaWidth = 1800;
   private arenaHeight = 1800;
@@ -268,13 +312,14 @@ export class MojiSurvivorEngine {
     hp: 100,
     maxHp: 100,
     armorReduction: 0,
-    baseSpeed: 215,
-    regenPerSec: 0,
-    pickupRadius: 80,
+    baseSpeed: 230,
+    regenPerSec: 0.4,
+    pickupRadius: 85,
     damageMultiplier: 1,
+    fireRateHaste: 1,
     level: 1,
     exp: 0,
-    expNext: 22,
+    expNext: 18,
     invulnTimer: 0,
     orbitHitCooldowns: new Map<number, number>(),
     weapons: [] as ActiveWeapon[],
@@ -288,11 +333,15 @@ export class MojiSurvivorEngine {
   };
 
   private afterimageTimer = 0;
+  private siphonCooldown = 0;
+  private stationaryTimer = 0;
+  private stationaryAnchor = { x: 900, y: 900 };
 
   // Run counters
   public runSessionId = '';
   private wave = 1;
   private waveTimer = 0;
+  private midWaveSurgeTriggered = false;
   private readonly waveDuration = 30;
   private score = 0;
   private mojoEarned = 0;
@@ -313,13 +362,19 @@ export class MojiSurvivorEngine {
   private orbs: DropOrb[] = [];
   private crates: PowerUpCrate[] = [];
   private shockwaves: ShockwaveRing[] = [];
+  private hazards: HazardZone[] = [];
   private particles: VisualParticle[] = [];
   private activeBoss: EnemyEntity | null = null;
 
   private spawnTimer = 0;
-  private crateTimer = 8;
+  private crateTimer = 14;
   private shakeTimer = 0;
   private shakeMagnitude = 0;
+
+  // Hardware-accelerated DOM <img> sprite pool so animated .gif / .webp NIP-30 emojis animate natively in the Arena
+  private spriteLayerEl: HTMLDivElement | null = null;
+  private enemySpriteEls = new Map<number, HTMLImageElement>();
+  private playerSpriteEl: HTMLImageElement | null = null;
 
   // Invisible touch/pointer drag vector + keyboard state (ZERO visible virtual joystick)
   private activePointerId: number | null = null;
@@ -334,7 +389,8 @@ export class MojiSurvivorEngine {
     upgrades: UpgradeLevels,
     settings: GameSettings,
     callbacks: GameEngineCallbacks,
-    initialCheckpoint?: ActiveRunCheckpoint | null
+    initialCheckpoint?: ActiveRunCheckpoint | null,
+    careerPlayerLevel = 1
   ) {
     this.canvas = canvas;
     const context = canvas.getContext('2d', { alpha: false });
@@ -345,10 +401,37 @@ export class MojiSurvivorEngine {
     this.upgrades = upgrades;
     this.settings = settings;
     this.callbacks = callbacks;
+    this.careerPlayerLevel = Math.max(1, careerPlayerLevel);
 
+    this.initSpriteLayer();
     this.initRunState(initialCheckpoint);
     this.bindInputs();
     this.resizeCanvas();
+  }
+
+  private initSpriteLayer(): void {
+    const parent = this.canvas.parentElement;
+    if (!parent || typeof document === 'undefined') return;
+    const layer = document.createElement('div');
+    layer.setAttribute('aria-hidden', 'true');
+    layer.style.position = 'absolute';
+    layer.style.inset = '0';
+    layer.style.overflow = 'hidden';
+    layer.style.pointerEvents = 'none';
+    layer.style.zIndex = '5';
+    parent.appendChild(layer);
+    this.spriteLayerEl = layer;
+  }
+
+  private clearSpriteDomElements(): void {
+    for (const el of this.enemySpriteEls.values()) {
+      el.remove();
+    }
+    this.enemySpriteEls.clear();
+    if (this.playerSpriteEl) {
+      this.playerSpriteEl.remove();
+      this.playerSpriteEl = null;
+    }
   }
 
   public updateSettings(next: GameSettings): void {
@@ -356,25 +439,29 @@ export class MojiSurvivorEngine {
   }
 
   private initRunState(checkpoint?: ActiveRunCheckpoint | null): void {
-    const maxHp = 100 + this.upgrades.defense * 18;
+    const careerBonusLv = Math.max(0, this.careerPlayerLevel - 1);
+    const maxHp = 100 + this.upgrades.defense * 22 + careerBonusLv * 4;
     const restoredWeapons: ActiveWeapon[] =
       checkpoint && Array.isArray(checkpoint.weapons) && checkpoint.weapons.length > 0
-        ? checkpoint.weapons.map((w) => ({
-            id: w.id,
-            level: w.level,
-            cooldown: w.cooldown,
-            timer: w.cooldown * 0.5,
-            damage: w.damage,
-            range: w.range,
-          }))
-        : [
+        ? checkpoint.weapons.map((w) => {
+            const calibrated = computeWeaponStatsForLevel(w.id, w.level);
+            return {
+              id: w.id,
+              level: w.level,
+              cooldown: calibrated.cooldown,
+              timer: calibrated.cooldown * 0.5,
+              damage: calibrated.damage,
+              range: calibrated.range,
+            };
+          })
+          : [
             {
               id: 'lightning_zap',
               level: 1,
-              cooldown: 1.0,
-              timer: 0.7,
-              damage: 32,
-              range: 310,
+              cooldown: 0.78,
+              timer: 0.62,
+              damage: 28,
+              range: 210,
             },
           ];
 
@@ -382,17 +469,18 @@ export class MojiSurvivorEngine {
       x: this.arenaWidth / 2,
       y: this.arenaHeight / 2,
       radius: 20,
-      hp: checkpoint ? Math.max(12, Math.min(maxHp, checkpoint.playerHp)) : maxHp,
+      hp: checkpoint ? Math.max(25, Math.min(maxHp, checkpoint.playerHp)) : maxHp,
       maxHp,
-      armorReduction: Math.min(0.45, this.upgrades.defense * 0.04),
-      baseSpeed: 215 * (1 + this.upgrades.speed * 0.07),
-      regenPerSec: this.upgrades.regen * 0.6,
-      pickupRadius: 75 + this.upgrades.magnet * 22,
-      damageMultiplier: 1 + this.upgrades.attack * 0.12,
+      armorReduction: Math.min(0.38, this.upgrades.defense * 0.045 + careerBonusLv * 0.006),
+      baseSpeed: 232 * (1 + this.upgrades.speed * 0.06 + Math.min(0.18, careerBonusLv * 0.006)),
+      regenPerSec: 0.35 + this.upgrades.regen * 0.55 + careerBonusLv * 0.08,
+      pickupRadius: 86 + this.upgrades.magnet * 22 + careerBonusLv * 1.5,
+      damageMultiplier: 1 + this.upgrades.attack * 0.16 + careerBonusLv * 0.035,
+      fireRateHaste: 1 + Math.min(0.28, careerBonusLv * 0.012),
       level: checkpoint ? Math.max(1, checkpoint.spellLevel) : 1,
       exp: checkpoint ? Math.max(0, checkpoint.spellExp) : 0,
-      expNext: checkpoint ? Math.max(20, checkpoint.spellExpNext) : 20,
-      invulnTimer: checkpoint ? 1.2 : 0,
+      expNext: checkpoint ? Math.max(18, checkpoint.spellExpNext) : 18,
+      invulnTimer: 1.5,
       orbitHitCooldowns: new Map(),
       weapons: restoredWeapons,
       buffs: {
@@ -410,6 +498,7 @@ export class MojiSurvivorEngine {
       `run_${Date.now()}_${sha256Hex(`${Date.now()}:${randomSalt}`).slice(0, 10)}`;
     this.wave = checkpoint ? Math.max(1, checkpoint.wave) : 1;
     this.waveTimer = checkpoint ? Math.max(0, checkpoint.waveTimer) : 0;
+    this.midWaveSurgeTriggered = this.waveTimer >= 16;
     this.score = checkpoint ? Math.max(0, checkpoint.score) : 0;
     this.mojoEarned = checkpoint ? Math.max(0, checkpoint.mojoEarned) : 0;
     this.careerXpEarned = checkpoint ? Math.max(0, checkpoint.careerXpEarned) : 0;
@@ -421,6 +510,9 @@ export class MojiSurvivorEngine {
     this.lastFlushedMojo = this.mojoEarned;
     this.lastFlushedXp = this.careerXpEarned;
     this.lastFlushedKills = this.defeated;
+    this.siphonCooldown = 0;
+    this.stationaryTimer = 0;
+    this.stationaryAnchor = { x: this.player.x, y: this.player.y };
 
     this.enemies = [];
     this.projectiles = [];
@@ -428,10 +520,19 @@ export class MojiSurvivorEngine {
     this.orbs = [];
     this.crates = [];
     this.shockwaves = [];
+    this.hazards = [];
     this.particles = [];
     this.activeBoss = null;
-    this.spawnTimer = 0.25;
-    this.crateTimer = 10;
+    this.spawnTimer = 1.35;
+    this.crateTimer = 14;
+    this.clearSpriteDomElements();
+
+    // Seed 2 approachable starter enemies at safe perimeter distance so the player isn't ambushed on start
+    const baseOpeningAngle = Math.random() * Math.PI * 2;
+    for (let i = 0; i < 2; i++) {
+      const ang = baseOpeningAngle + i * (Math.PI * 0.65) + (Math.random() - 0.5) * 0.25;
+      this.spawnRegularEnemy(ang, 370 + Math.random() * 60, false);
+    }
   }
 
   private bindInputs(): void {
@@ -606,9 +707,10 @@ export class MojiSurvivorEngine {
   public applyLevelUpChoice(choice: LevelUpChoice): void {
     const existing = this.player.weapons.find((w) => w.id === choice.id);
     if (existing) {
+      const calibrated = computeWeaponStatsForLevel(choice.id, choice.nextLevel);
       existing.level = choice.nextLevel;
-      existing.damage = choice.projectedDamage;
-      existing.cooldown = choice.projectedCooldown;
+      existing.damage = calibrated.damage;
+      existing.cooldown = calibrated.cooldown;
       this.callbacks.onBannerToast(`Merged into ${choice.evolvedName}`);
     } else {
       const def = WEAPON_CATALOG.find((w) => w.id === choice.id)!;
@@ -636,6 +738,11 @@ export class MojiSurvivorEngine {
       this.rafId = null;
     }
     this.cleanupListeners?.();
+    this.clearSpriteDomElements();
+    if (this.spriteLayerEl) {
+      this.spriteLayerEl.remove();
+      this.spriteLayerEl = null;
+    }
   }
 
   private tick = (now: number): void => {
@@ -677,9 +784,35 @@ export class MojiSurvivorEngine {
       this.flushCheckpoint(false);
     }
 
+    // Mid-wave surge in Wave 4+ from a flanking arc (never a 360-degree inescapable trap)
+    const maxActiveCap =
+      this.wave === 1
+        ? 10
+        : this.wave === 2
+          ? 14
+          : this.wave === 3
+            ? 18
+            : this.wave === 4
+              ? 22
+              : Math.min(44, 14 + this.wave * 2);
+
+    if (!this.midWaveSurgeTriggered && this.wave >= 4 && this.waveTimer >= 16) {
+      this.midWaveSurgeTriggered = true;
+      const ambushCount = Math.min(6, 2 + Math.floor(this.wave / 2));
+      const baseArc = Math.random() * Math.PI * 2;
+      for (let i = 0; i < ambushCount; i++) {
+        if (this.enemies.length >= maxActiveCap) break;
+        const angle = baseArc + (i - ambushCount / 2) * 0.38;
+        const isGuaranteedElite = this.wave >= 4 && i === 0;
+        this.spawnRegularEnemy(angle, 410, isGuaranteedElite);
+      }
+      this.callbacks.onBannerToast(`Wave ${this.wave} Swarm Surge!`);
+    }
+
     if (this.waveTimer >= this.waveDuration) {
       this.waveTimer -= this.waveDuration;
       this.wave += 1;
+      this.midWaveSurgeTriggered = false;
       this.careerXpEarned += 20;
       this.flushCheckpoint(false);
       if (this.wave % 5 === 0) {
@@ -689,11 +822,13 @@ export class MojiSurvivorEngine {
       }
     }
 
-    // Regenerate HP & decay timers
+    // Regenerate HP & decay timers (standing completely still reduces passive regen by 75%)
+    if (this.siphonCooldown > 0) this.siphonCooldown = Math.max(0, this.siphonCooldown - dt);
     if (this.player.regenPerSec > 0 && this.player.hp < this.player.maxHp) {
+      const regenMult = this.stationaryTimer > 1.8 ? 0.25 : 1.0;
       this.player.hp = Math.min(
         this.player.maxHp,
-        this.player.hp + this.player.regenPerSec * dt
+        this.player.hp + this.player.regenPerSec * regenMult * dt
       );
     }
     if (this.player.invulnTimer > 0) this.player.invulnTimer = Math.max(0, this.player.invulnTimer - dt);
@@ -712,7 +847,7 @@ export class MojiSurvivorEngine {
 
     // Move player inside arena bounds
     const mv = this.resolveMovementVector();
-    const speedBoost = this.player.buffs.speedTimer > 0 ? 1.7 : 1.0;
+    const speedBoost = this.player.buffs.speedTimer > 0 ? 1.55 : 1.0;
     const velocity = this.player.baseSpeed * speedBoost;
     this.player.x = Math.max(
       36,
@@ -723,7 +858,31 @@ export class MojiSurvivorEngine {
       Math.min(this.arenaHeight - 36, this.player.y + mv.y * velocity * dt)
     );
 
-    // Speed boost pink neon trail
+    // Track stationary camping / AFK position & fire telegraphed Target-Lock Mortar if camping in one spot
+    const anchorDist = Math.hypot(
+      this.player.x - this.stationaryAnchor.x,
+      this.player.y - this.stationaryAnchor.y
+    );
+    if (anchorDist > 28) {
+      this.stationaryAnchor = { x: this.player.x, y: this.player.y };
+      this.stationaryTimer = 0;
+    } else {
+      this.stationaryTimer += dt;
+      const lockThreshold = this.wave >= 5 ? 2.6 : 3.2;
+      if (this.wave >= 2 && this.stationaryTimer >= lockThreshold && this.enemies.length > 0) {
+        this.stationaryTimer = lockThreshold - 1.35;
+        this.hazards.push({
+          x: this.player.x,
+          y: this.player.y,
+          radius: 56,
+          fuse: 0.9,
+          maxFuse: 0.9,
+          damage: Math.round(this.player.maxHp * 0.22 + this.wave * 4.5),
+        });
+      }
+    }
+
+    // Speed boost cyan neon trail
     if (this.player.buffs.speedTimer > 0 && (Math.abs(mv.x) > 0.05 || Math.abs(mv.y) > 0.05)) {
       this.afterimageTimer += dt;
       if (this.afterimageTimer >= 0.055) {
@@ -742,28 +901,47 @@ export class MojiSurvivorEngine {
       }
     }
 
-    // Spawn enemies
-    const spawnInterval = Math.max(0.28, 1.25 - this.wave * 0.075);
-    this.spawnTimer -= dt;
-    if (this.spawnTimer <= 0 && this.enemies.length < 95) {
+    // Spawn enemies with controlled on-screen cap so waves stay readable and conquerable
+    const minActiveEnemies =
+      this.wave === 1
+        ? 3
+        : this.wave === 2
+          ? 4
+          : Math.min(18, 3 + this.wave);
+    const spawnInterval =
+      this.wave === 1
+        ? 1.35
+        : this.wave === 2
+          ? 1.15
+          : this.wave === 3
+            ? 1.0
+            : Math.max(0.45, 1.05 - this.wave * 0.045);
+    this.spawnTimer -= dt * (this.enemies.length < minActiveEnemies ? 1.35 : 1.0);
+    if (this.spawnTimer <= 0 && this.enemies.length < maxActiveCap) {
       this.spawnTimer = spawnInterval;
-      const batch = this.wave >= 6 ? 2 : 1;
+      const baseBatch =
+        this.wave <= 2 ? 1 : 1 + Math.floor((this.wave - 1) / 3);
+      const extra =
+        this.wave >= 3 && Math.random() < 0.35 ? 1 : 0;
+      const batch = Math.min(3, baseBatch + extra);
       for (let i = 0; i < batch; i++) {
+        if (this.enemies.length >= maxActiveCap) break;
         this.spawnRegularEnemy();
       }
     }
 
     // Spawn temporary power-up crates
     this.crateTimer -= dt;
-    if (this.crateTimer <= 0 && this.crates.length < 3) {
-      this.crateTimer = 17;
+    if (this.crateTimer <= 0 && this.crates.length < 2) {
+      this.crateTimer = 20;
       this.spawnPowerUpCrate();
     }
 
-    // Fire auto-weapons
-    const fireRateMult = this.player.buffs.furyTimer > 0 ? 1.5 : 1.0;
+    // Fire auto-weapons (scaled by Career Level haste + Overclock Fury)
+    const fireRateMult =
+      this.player.fireRateHaste * (this.player.buffs.furyTimer > 0 ? 1.3 : 1.0);
     const dmgMult =
-      this.player.damageMultiplier * (this.player.buffs.furyTimer > 0 ? 2.0 : 1.0);
+      this.player.damageMultiplier * (this.player.buffs.furyTimer > 0 ? 1.45 : 1.0);
 
     for (const weapon of this.player.weapons) {
       if (weapon.id === 'orbiting_blades') {
@@ -790,18 +968,45 @@ export class MojiSurvivorEngine {
     }
   }
 
-  private spawnRegularEnemy(): void {
+  private spawnRegularEnemy(
+    forceAngle?: number,
+    forceDist?: number,
+    forceElite?: boolean
+  ): void {
     const pool = this.callbacks.getEmojiPool();
     if (pool.length === 0) return;
     const trait = pool[Math.floor(Math.random() * pool.length)];
 
-    const angle = Math.random() * Math.PI * 2;
-    const dist = 460 + Math.random() * 140;
+    const angle = forceAngle ?? Math.random() * Math.PI * 2;
+    const dist = forceDist ?? 350 + Math.random() * 110;
     const x = Math.max(40, Math.min(this.arenaWidth - 40, this.player.x + Math.cos(angle) * dist));
     const y = Math.max(40, Math.min(this.arenaHeight - 40, this.player.y + Math.sin(angle) * dist));
 
-    const waveScale = 1 + (this.wave - 1) * 0.16;
-    const hp = Math.round(trait.hp * waveScale);
+    const w = Math.max(0, this.wave - 1);
+    const lateWave = Math.max(0, this.wave - 5);
+    const intraWave = (this.waveTimer / this.waveDuration) * 0.1;
+    // Waves 1-4 stay approachable; Wave 6+ ramps progressively so late waves challenge high-level builds
+    const waveHpScale =
+      (1 + w * 0.24 + Math.pow(w, 1.45) * 0.075 + Math.pow(lateWave, 1.85) * 0.16) *
+      (1 + intraWave);
+    const isElite =
+      forceElite ?? (this.wave >= 3 && Math.random() < Math.min(0.24, 0.04 + w * 0.016));
+    const bruteMult = trait.behaviorType === 2 ? 1.25 : 1.0;
+    const eliteHpMult = isElite ? 1.85 : 1.0;
+    const baseCombatHp = 16 + trait.hp * 0.28;
+    const hp = Math.max(20, Math.round(baseCombatHp * waveHpScale * bruteMult * eliteHpMult));
+
+    const baseSpeed = 56 + trait.speed * 22;
+    const waveSpeedScale = 0.86 + Math.min(0.78, w * 0.052 + lateWave * 0.02);
+    const speed = baseSpeed * waveSpeedScale * (isElite ? 1.1 : 1.0);
+
+    const waveDmgScale = 1 + w * 0.15 + Math.pow(w, 1.25) * 0.045 + Math.pow(lateWave, 1.5) * 0.08;
+    const damage = Math.max(
+      4,
+      Math.round((3 + trait.damage * 0.45) * waveDmgScale * (isElite ? 1.25 : 1.0))
+    );
+
+    const baseRadius = trait.behaviorType === 2 ? 21 : 17;
 
     this.enemies.push({
       uid: this.nextEntityUid++,
@@ -810,13 +1015,15 @@ export class MojiSurvivorEngine {
       y,
       hp,
       maxHp: hp,
-      speed: (48 + trait.speed * 26) * (1 + Math.min(0.45, (this.wave - 1) * 0.03)),
-      damage: Math.round(trait.damage * (1 + (this.wave - 1) * 0.08)),
-      radius: trait.behaviorType === 2 ? 22 : 17,
+      speed,
+      damage,
+      radius: isElite ? baseRadius + 4 : baseRadius,
       isBoss: false,
+      isElite,
       phaseAngle: Math.random() * Math.PI * 2,
-      actionTimer: 1.5 + Math.random() * 1.5,
+      actionTimer: 1.5 + Math.random() * 1.2,
       hitFlash: 0,
+      knockbackCooldown: 0,
     });
   }
 
@@ -828,12 +1035,19 @@ export class MojiSurvivorEngine {
 
     retroAudio.playBossSiren();
     triggerHaptic(60, this.settings.haptics);
-    this.callbacks.onBannerToast(`Wave ${this.wave} Apex Boss — :${bossTrait.shortcode}:`);
+    this.callbacks.onBannerToast(
+      `Wave ${this.wave} Apex Boss · #${bossTrait.hash.slice(0, 6)}`
+    );
 
     const angle = Math.random() * Math.PI * 2;
-    const x = Math.max(80, Math.min(this.arenaWidth - 80, this.player.x + Math.cos(angle) * 420));
-    const y = Math.max(80, Math.min(this.arenaHeight - 80, this.player.y + Math.sin(angle) * 420));
-    const bossHp = Math.round((950 + this.wave * 240) * (bossTrait.powerRating / 90));
+    const x = Math.max(80, Math.min(this.arenaWidth - 80, this.player.x + Math.cos(angle) * 320));
+    const y = Math.max(80, Math.min(this.arenaHeight - 80, this.player.y + Math.sin(angle) * 320));
+    const w = Math.max(0, this.wave - 1);
+    const lateWave = Math.max(0, this.wave - 5);
+    const bossHp = Math.round(
+      (560 + this.wave * 165 + Math.pow(w, 1.72) * 44 + Math.pow(lateWave, 2.0) * 65) *
+        (bossTrait.powerRating / 90)
+    );
 
     const boss: EnemyEntity = {
       uid: this.nextEntityUid++,
@@ -842,13 +1056,15 @@ export class MojiSurvivorEngine {
       y,
       hp: bossHp,
       maxHp: bossHp,
-      speed: 78,
-      damage: 24 + this.wave * 2,
-      radius: 42,
+      speed: 112 + Math.min(68, this.wave * 3.2),
+      damage: Math.round(20 + this.wave * 3.4 + Math.pow(lateWave, 1.35) * 2.2),
+      radius: 40,
       isBoss: true,
+      isElite: true,
       phaseAngle: 0,
-      actionTimer: 2.4,
+      actionTimer: 1.65,
       hitFlash: 0,
+      knockbackCooldown: 999,
     };
     this.enemies.push(boss);
     this.activeBoss = boss;
@@ -863,13 +1079,13 @@ export class MojiSurvivorEngine {
     ];
     const picked = options[Math.floor(Math.random() * options.length)];
     const angle = Math.random() * Math.PI * 2;
-    const dist = 200 + Math.random() * 240;
+    const dist = 180 + Math.random() * 200;
     this.crates.push({
       x: Math.max(60, Math.min(this.arenaWidth - 60, this.player.x + Math.cos(angle) * dist)),
       y: Math.max(60, Math.min(this.arenaHeight - 60, this.player.y + Math.sin(angle) * dist)),
       kind: picked.kind,
       label: picked.label,
-      life: 24,
+      life: 22,
     });
   }
 
@@ -877,37 +1093,69 @@ export class MojiSurvivorEngine {
     if (this.enemies.length === 0) return;
 
     if (weapon.id === 'lightning_zap') {
-      const nearest = [...this.enemies]
+      const maxRange = Math.min(275, weapon.range + weapon.level * 14);
+      const candidates = [...this.enemies]
         .map((e) => ({ e, d: Math.hypot(e.x - this.player.x, e.y - this.player.y) }))
-        .filter((item) => item.d <= weapon.range + weapon.level * 24)
-        .sort((a, b) => a.d - b.d)
-        .slice(0, Math.min(4, weapon.level));
+        .filter((item) => item.d <= maxRange)
+        .sort((a, b) => a.d - b.d);
 
-      if (nearest.length > 0) {
+      if (candidates.length > 0) {
         retroAudio.playShoot('zap');
-        for (const { e } of nearest) {
-          this.particles.push({
-            kind: 'arc',
-            x: this.player.x,
-            y: this.player.y,
-            x2: e.x,
-            y2: e.y,
-            vx: 0,
-            vy: 0,
-            radius: 2,
-            color: '#00F0FF',
-            life: 0.14,
-            maxLife: 0.14,
-          });
-          this.damageEnemy(e, weapon.damage * dmgMult);
+        const primary = candidates[0].e;
+        this.particles.push({
+          kind: 'arc',
+          x: this.player.x,
+          y: this.player.y,
+          x2: primary.x,
+          y2: primary.y,
+          vx: 0,
+          vy: 0,
+          radius: 2,
+          color: '#00F0FF',
+          life: 0.14,
+          maxLife: 0.14,
+        });
+        this.damageEnemy(primary, weapon.damage * dmgMult);
+
+        // Chain arcs scale from 1 target at Lv.1 up to 4 targets at Lv.4+
+        const maxChainTargets = Math.min(4, weapon.level);
+        const chainDmgMult = weapon.level === 1 ? 0.55 : weapon.level === 2 ? 0.72 : 0.85;
+        if (maxChainTargets > 0) {
+          const chainJumpNeighbors = [...this.enemies]
+            .filter((other) => other.uid !== primary.uid)
+            .map((other) => ({
+              e: other,
+              d: Math.hypot(other.x - primary.x, other.y - primary.y),
+            }))
+            .filter((item) => item.d <= 150)
+            .sort((a, b) => a.d - b.d)
+            .slice(0, maxChainTargets);
+
+          for (const { e: chained } of chainJumpNeighbors) {
+            this.particles.push({
+              kind: 'arc',
+              x: primary.x,
+              y: primary.y,
+              x2: chained.x,
+              y2: chained.y,
+              vx: 0,
+              vy: 0,
+              radius: 1.5,
+              color: '#00F0FF',
+              life: 0.12,
+              maxLife: 0.12,
+            });
+            this.damageEnemy(chained, weapon.damage * dmgMult * chainDmgMult);
+          }
         }
       }
     } else if (weapon.id === 'garlic_aura') {
-      const radius = weapon.range + weapon.level * 18;
+      const radius = Math.min(145, weapon.range + weapon.level * 10);
       let hitAny = false;
       for (const e of [...this.enemies]) {
-        if (Math.hypot(e.x - this.player.x, e.y - this.player.y) <= radius + e.radius) {
-          this.damageEnemy(e, weapon.damage * dmgMult);
+        const dist = Math.hypot(e.x - this.player.x, e.y - this.player.y);
+        if (dist <= radius + e.radius) {
+          this.damageEnemy(e, weapon.damage * dmgMult, true);
           hitAny = true;
         }
       }
@@ -924,26 +1172,27 @@ export class MojiSurvivorEngine {
         });
       }
     } else if (weapon.id === 'plasma_lance') {
-      const target = [...this.enemies].sort(
-        (a, b) =>
-          Math.hypot(a.x - this.player.x, a.y - this.player.y) -
-          Math.hypot(b.x - this.player.x, b.y - this.player.y)
-      )[0];
+      const maxAcquireRange = weapon.range + weapon.level * 18;
+      const target = [...this.enemies]
+        .map((e) => ({ e, d: Math.hypot(e.x - this.player.x, e.y - this.player.y) }))
+        .filter((item) => item.d <= maxAcquireRange)
+        .sort((a, b) => a.d - b.d)[0]?.e;
       if (!target) return;
       const baseAngle = Math.atan2(target.y - this.player.y, target.x - this.player.x);
-      const count = weapon.level >= 2 ? 2 : 1;
+      const count = weapon.level >= 3 ? 3 : weapon.level >= 2 ? 2 : 1;
+      const perBoltDmg = weapon.damage * dmgMult;
       retroAudio.playShoot('lance');
       for (let i = 0; i < count; i++) {
-        const spread = count === 2 ? (i === 0 ? -0.09 : 0.09) : 0;
+        const spread = count === 1 ? 0 : (i - (count - 1) / 2) * 0.14;
         const ang = baseAngle + spread;
         this.projectiles.push({
           x: this.player.x,
           y: this.player.y,
-          vx: Math.cos(ang) * 540,
-          vy: Math.sin(ang) * 540,
-          damage: weapon.damage * dmgMult,
-          pierceLeft: 1 + weapon.level,
-          life: 1.1,
+          vx: Math.cos(ang) * 490,
+          vy: Math.sin(ang) * 490,
+          damage: perBoltDmg,
+          pierceLeft: Math.min(6, 2 + weapon.level),
+          life: 0.65,
           hitIds: new Set(),
         });
       }
@@ -952,10 +1201,10 @@ export class MojiSurvivorEngine {
       this.shockwaves.push({
         x: this.player.x,
         y: this.player.y,
-        radius: 24,
-        maxRadius: weapon.range + weapon.level * 38,
-        life: 0.42,
-        maxLife: 0.42,
+        radius: 20,
+        maxRadius: Math.min(255, weapon.range + weapon.level * 18),
+        life: 0.38,
+        maxLife: 0.38,
         playerDamage: weapon.damage * dmgMult,
         color: '#818CF8',
         hitIds: new Set(),
@@ -969,9 +1218,11 @@ export class MojiSurvivorEngine {
       else this.player.orbitHitCooldowns.set(uid, cd - dt);
     }
 
-    const bladeCount = weapon.level + 1;
-    const spin = performance.now() / 420;
-    const orbitRadius = weapon.range + weapon.level * 6;
+    const bladeCount = Math.min(5, 1 + weapon.level);
+    const spin = performance.now() / 360;
+    const orbitRadius = Math.min(104, weapon.range + weapon.level * 5);
+    const hitCooldown = Math.max(0.28, weapon.cooldown);
+    const perBladeDmg = weapon.damage * dmgMult;
 
     for (let b = 0; b < bladeCount; b++) {
       const ang = spin + (b * Math.PI * 2) / bladeCount;
@@ -980,9 +1231,9 @@ export class MojiSurvivorEngine {
 
       for (const e of [...this.enemies]) {
         if (this.player.orbitHitCooldowns.has(e.uid)) continue;
-        if (Math.hypot(e.x - bx, e.y - by) <= e.radius + 11) {
-          this.player.orbitHitCooldowns.set(e.uid, 0.32);
-          this.damageEnemy(e, weapon.damage * dmgMult);
+        if (Math.hypot(e.x - bx, e.y - by) <= e.radius + 14) {
+          this.player.orbitHitCooldowns.set(e.uid, hitCooldown);
+          this.damageEnemy(e, perBladeDmg, true);
         }
       }
     }
@@ -1002,7 +1253,7 @@ export class MojiSurvivorEngine {
 
       for (const e of [...this.enemies]) {
         if (p.hitIds.has(e.uid)) continue;
-        if (Math.hypot(e.x - p.x, e.y - p.y) <= e.radius + 8) {
+        if (Math.hypot(e.x - p.x, e.y - p.y) <= e.radius + 13) {
           p.hitIds.add(e.uid);
           this.damageEnemy(e, p.damage);
           p.pierceLeft -= 1;
@@ -1016,9 +1267,36 @@ export class MojiSurvivorEngine {
   }
 
   private stepEnemies(dt: number): void {
+    // Pairwise separation pass so enemies fan out into a surrounding horde instead of stacking on 1 pixel
+    for (let i = 0; i < this.enemies.length; i++) {
+      const a = this.enemies[i];
+      for (let j = i + 1; j < this.enemies.length; j++) {
+        const b = this.enemies[j];
+        const sdx = a.x - b.x;
+        const sdy = a.y - b.y;
+        const minSep = a.radius + b.radius + 6;
+        if (Math.abs(sdx) >= minSep || Math.abs(sdy) >= minSep) continue;
+        const sDist = Math.hypot(sdx, sdy);
+        if (sDist > 0.001 && sDist < minSep) {
+          const push = ((minSep - sDist) / minSep) * 48 * dt;
+          const pnx = sdx / sDist;
+          const pny = sdy / sDist;
+          if (!a.isBoss) {
+            a.x += pnx * push;
+            a.y += pny * push;
+          }
+          if (!b.isBoss) {
+            b.x -= pnx * push;
+            b.y -= pny * push;
+          }
+        }
+      }
+    }
+
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
       if (e.hitFlash > 0) e.hitFlash = Math.max(0, e.hitFlash - dt);
+      if (e.knockbackCooldown > 0) e.knockbackCooldown = Math.max(0, e.knockbackCooldown - dt);
 
       const dx = this.player.x - e.x;
       const dy = this.player.y - e.y;
@@ -1027,75 +1305,122 @@ export class MojiSurvivorEngine {
       const ny = dy / dist;
 
       if (e.isBoss) {
-        e.x += nx * e.speed * dt;
-        e.y += ny * e.speed * dt;
+        const lungeMult = e.actionTimer < 0.55 ? 1.52 : 1.0;
+        e.x += nx * e.speed * lungeMult * dt;
+        e.y += ny * e.speed * lungeMult * dt;
         e.actionTimer -= dt;
         if (e.actionTimer <= 0) {
-          e.actionTimer = 2.6;
-          // Radial projectile burst + shockwave
-          const spokes = 8;
+          e.actionTimer = Math.max(1.25, 1.75 - this.wave * 0.015);
+          // Radial projectile burst + aimed 3-shot fan + Target-Lock Mortar on player coordinates
+          const spokes = 8 + Math.min(8, Math.floor(this.wave / 3));
           for (let s = 0; s < spokes; s++) {
             const ang = e.phaseAngle + (s * Math.PI * 2) / spokes;
             this.enemyBullets.push({
               x: e.x,
               y: e.y,
-              vx: Math.cos(ang) * 185,
-              vy: Math.sin(ang) * 185,
-              damage: e.damage * 0.75,
+              vx: Math.cos(ang) * 245,
+              vy: Math.sin(ang) * 245,
+              damage: e.damage * 0.85,
               radius: 6,
               life: 3.4,
             });
           }
-          e.phaseAngle += 0.4;
+          const aimedAngle = Math.atan2(dy, dx);
+          for (const offset of [-0.18, 0, 0.18]) {
+            const ang = aimedAngle + offset;
+            this.enemyBullets.push({
+              x: e.x,
+              y: e.y,
+              vx: Math.cos(ang) * 290,
+              vy: Math.sin(ang) * 290,
+              damage: e.damage * 0.9,
+              radius: 6,
+              life: 3.0,
+            });
+          }
+          // Target-Lock Mortar at player's exact position (forces movement)
+          this.hazards.push({
+            x: this.player.x,
+            y: this.player.y,
+            radius: 58,
+            fuse: 0.9,
+            maxFuse: 0.9,
+            damage: Math.round(e.damage * 1.15),
+          });
+          if (dist < 210) {
+            this.shockwaves.push({
+              x: e.x,
+              y: e.y,
+              radius: 26,
+              maxRadius: 165,
+              life: 0.45,
+              maxLife: 0.45,
+              enemyDamage: e.damage * 0.95,
+              color: '#FF2442',
+              hitIds: new Set(),
+            });
+          }
+          e.phaseAngle += 0.45;
         }
       } else if (e.trait.behaviorType === 0) {
-        // Swarm Rusher
-        e.x += nx * e.speed * 1.12 * dt;
-        e.y += ny * e.speed * 1.12 * dt;
+        // Swarm Rusher: slight burst when closing in without outrunning early players
+        const rushBoost = dist < 180 ? 1.14 : 1.03;
+        e.x += nx * e.speed * rushBoost * dt;
+        e.y += ny * e.speed * rushBoost * dt;
       } else if (e.trait.behaviorType === 1) {
         // Zigzag Stalker
-        e.phaseAngle += dt * 6;
-        const perpX = -ny * Math.sin(e.phaseAngle) * 0.65;
-        const perpY = nx * Math.sin(e.phaseAngle) * 0.65;
-        e.x += (nx + perpX) * e.speed * dt;
-        e.y += (ny + perpY) * e.speed * dt;
+        e.phaseAngle += dt * 6.0;
+        const perpX = -ny * Math.sin(e.phaseAngle) * 0.58;
+        const perpY = nx * Math.sin(e.phaseAngle) * 0.58;
+        e.x += (nx * 1.0 + perpX) * e.speed * dt;
+        e.y += (ny * 1.0 + perpY) * e.speed * dt;
       } else if (e.trait.behaviorType === 2) {
         // Shockwave Brute
-        e.x += nx * e.speed * 0.78 * dt;
-        e.y += ny * e.speed * 0.78 * dt;
+        e.x += nx * e.speed * 0.86 * dt;
+        e.y += ny * e.speed * 0.86 * dt;
         e.actionTimer -= dt;
-        if (e.actionTimer <= 0 && dist < 170) {
-          e.actionTimer = 3.5;
+        if (this.wave >= 2 && e.actionTimer <= 0 && dist < 210) {
+          e.actionTimer = 2.6;
           this.shockwaves.push({
             x: e.x,
             y: e.y,
             radius: 18,
-            maxRadius: 120,
+            maxRadius: 135,
             life: 0.45,
             maxLife: 0.45,
-            enemyDamage: e.damage * 0.85,
+            enemyDamage: e.damage * 0.9,
             color: '#FF2442',
             hitIds: new Set(),
           });
+          if (e.isElite && this.wave >= 5 && this.hazards.length < 3) {
+            this.hazards.push({
+              x: this.player.x,
+              y: this.player.y,
+              radius: 50,
+              fuse: 0.95,
+              maxFuse: 0.95,
+              damage: Math.round(e.damage * 1.05),
+            });
+          }
         }
       } else {
         // Orbiting Sniper
-        if (dist > 240) {
+        if (dist > 235) {
           e.x += nx * e.speed * dt;
           e.y += ny * e.speed * dt;
         } else {
-          e.x += -ny * e.speed * 0.75 * dt;
-          e.y += nx * e.speed * 0.75 * dt;
+          e.x += -ny * e.speed * 0.78 * dt;
+          e.y += nx * e.speed * 0.78 * dt;
         }
         e.actionTimer -= dt;
-        if (e.actionTimer <= 0 && dist < 360) {
-          e.actionTimer = 2.8;
+        if (this.wave >= 2 && e.actionTimer <= 0 && dist < 390) {
+          e.actionTimer = Math.max(1.65, 2.7 - this.wave * 0.04);
           this.enemyBullets.push({
             x: e.x,
             y: e.y,
-            vx: nx * 210,
-            vy: ny * 210,
-            damage: e.damage * 0.8,
+            vx: nx * 235,
+            vy: ny * 235,
+            damage: e.damage * 0.85,
             radius: 5,
             life: 2.6,
           });
@@ -1175,14 +1500,14 @@ export class MojiSurvivorEngine {
     this.callbacks.onBannerToast(crate.label);
 
     if (crate.kind === 'speed') {
-      this.player.buffs.speedTimer = 8;
+      this.player.buffs.speedTimer = 7;
     } else if (crate.kind === 'shield') {
-      this.player.buffs.shieldHits = 3;
-      this.player.buffs.shieldTimer = 12;
+      this.player.buffs.shieldHits = 2;
+      this.player.buffs.shieldTimer = 10;
     } else if (crate.kind === 'fury') {
-      this.player.buffs.furyTimer = 10;
+      this.player.buffs.furyTimer = 8;
     } else if (crate.kind === 'magnet') {
-      this.player.buffs.globalMagnetTimer = 4.5;
+      this.player.buffs.globalMagnetTimer = 4.0;
     }
   }
 
@@ -1199,7 +1524,7 @@ export class MojiSurvivorEngine {
           const dist = Math.hypot(e.x - sw.x, e.y - sw.y);
           if (Math.abs(dist - sw.radius) <= e.radius + 16) {
             sw.hitIds.add(e.uid);
-            this.damageEnemy(e, sw.playerDamage);
+            this.damageEnemy(e, sw.playerDamage, true);
           }
         }
       }
@@ -1217,6 +1542,29 @@ export class MojiSurvivorEngine {
       }
     }
 
+    // Target-Lock Mortar Hazard rings (punish stationary AFK camping while easily dodged when moving)
+    for (let i = this.hazards.length - 1; i >= 0; i--) {
+      const h = this.hazards[i];
+      h.fuse -= dt;
+      if (h.fuse <= 0) {
+        this.hazards.splice(i, 1);
+        this.shockwaves.push({
+          x: h.x,
+          y: h.y,
+          radius: 12,
+          maxRadius: h.radius,
+          life: 0.24,
+          maxLife: 0.24,
+          color: '#FF2442',
+          hitIds: new Set(),
+        });
+        const pDist = Math.hypot(this.player.x - h.x, this.player.y - h.y);
+        if (pDist <= h.radius + this.player.radius * 0.5) {
+          this.applyPlayerDamage(h.damage);
+        }
+      }
+    }
+
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
       p.life -= dt;
@@ -1229,10 +1577,28 @@ export class MojiSurvivorEngine {
     }
   }
 
-  private damageEnemy(enemy: EnemyEntity, rawAmount: number): void {
+  private damageEnemy(enemy: EnemyEntity, rawAmount: number, allowKnockback = false): void {
     const dmg = Math.max(1, Math.round(rawAmount));
     enemy.hp -= dmg;
     enemy.hitFlash = 0.09;
+
+    // Controlled close-quarters knockback with per-enemy cooldown & wave resistance (prevents AFK perma-juggling)
+    if (
+      allowKnockback &&
+      !enemy.isBoss &&
+      enemy.trait.behaviorType !== 2 &&
+      enemy.hp > 0 &&
+      enemy.knockbackCooldown <= 0
+    ) {
+      enemy.knockbackCooldown = 0.78;
+      const kdx = enemy.x - this.player.x;
+      const kdy = enemy.y - this.player.y;
+      const kDist = Math.max(1, Math.hypot(kdx, kdy));
+      const waveResist = Math.max(0.22, 1 - Math.max(0, this.wave - 2) * 0.065);
+      const knockbackPx = (enemy.isElite ? 5 : 10) * waveResist;
+      enemy.x = Math.max(36, Math.min(this.arenaWidth - 36, enemy.x + (kdx / kDist) * knockbackPx));
+      enemy.y = Math.max(36, Math.min(this.arenaHeight - 36, enemy.y + (kdy / kDist) * knockbackPx));
+    }
 
     if (this.particles.length < 140) {
       this.particles.push({
@@ -1263,11 +1629,14 @@ export class MojiSurvivorEngine {
 
       this.defeated += 1;
       this.careerXpEarned += Math.max(2, enemy.trait.expValue * 2);
-      this.score += Math.round(enemy.trait.powerRating * (enemy.isBoss ? 8 : 1));
+      this.score += Math.round(
+        enemy.trait.powerRating * (enemy.isBoss ? 8 : enemy.isElite ? 2.5 : 1)
+      );
 
       if (!this.featuredEmoji || enemy.trait.powerRating >= this.featuredEmoji.powerRating || enemy.isBoss) {
         this.featuredEmoji = {
           emojiKey: enemy.trait.emojiKey,
+          hash: enemy.trait.hash,
           shortcode: enemy.trait.shortcode,
           url: enemy.trait.url,
           tier: enemy.trait.tier,
@@ -1281,21 +1650,58 @@ export class MojiSurvivorEngine {
         this.flushCheckpoint(false);
       }
 
-      // Drop EXP shard and Mojo bounty
+      // Sustain siphon: Cooldown-gated & requires active movement (never rewards AFK standing still)
+      if (
+        this.player.hp < this.player.maxHp &&
+        this.stationaryTimer < 2.0 &&
+        (enemy.isBoss || (this.siphonCooldown <= 0 && (enemy.isElite || Math.random() < 0.05)))
+      ) {
+        if (!enemy.isBoss) {
+          this.siphonCooldown = 3.8;
+        }
+        const healAmt = Math.max(
+          3,
+          Math.round(this.player.maxHp * (enemy.isBoss ? 0.18 : enemy.isElite ? 0.04 : 0.025))
+        );
+        this.player.hp = Math.min(this.player.maxHp, this.player.hp + healAmt);
+        this.particles.push({
+          kind: 'text',
+          x: this.player.x,
+          y: this.player.y - this.player.radius - 12,
+          vx: 0,
+          vy: -26,
+          radius: 0,
+          text: `+${healAmt} HP`,
+          color: '#00FF9D',
+          life: 0.45,
+          maxLife: 0.45,
+        });
+      }
+
+      // Drop EXP shard and calibrated Mojo bounty (prevents coin-flooding while rewarding Elites/Bosses)
+      const expDrop = enemy.isBoss
+        ? 45
+        : enemy.isElite
+          ? enemy.trait.expValue * 3
+          : Math.max(3, Math.round(enemy.trait.expValue * 1.8));
       this.orbs.push({
         x: enemy.x,
         y: enemy.y,
         kind: 'exp',
-        value: enemy.isBoss ? 35 : enemy.trait.expValue * 4,
+        value: expDrop,
         magnetized: false,
       });
 
-      if (enemy.isBoss || Math.random() < 0.42) {
+      if (enemy.isBoss || enemy.isElite || Math.random() < 0.22) {
         this.orbs.push({
           x: enemy.x + 12,
           y: enemy.y - 7,
           kind: 'mojo',
-          value: enemy.isBoss ? 12 : enemy.trait.mojoValue,
+          value: enemy.isBoss
+            ? 15
+            : enemy.isElite
+              ? enemy.trait.mojoValue + 1
+              : enemy.trait.mojoValue,
           magnetized: false,
         });
       }
@@ -1323,7 +1729,22 @@ export class MojiSurvivorEngine {
 
   private applyPlayerDamage(rawDamage: number): void {
     if (this.player.invulnTimer > 0) return;
-    this.player.invulnTimer = 0.42;
+    this.player.invulnTimer = this.wave >= 8 ? 0.36 : 0.52;
+
+    // Defensive micro-repulse on hit in early waves so overlapping crowds cannot pin a moving player
+    if (this.wave <= 6) {
+      for (const e of this.enemies) {
+        if (e.isBoss) continue;
+        const rdx = e.x - this.player.x;
+        const rdy = e.y - this.player.y;
+        const rDist = Math.hypot(rdx, rdy);
+        if (rDist > 0.001 && rDist < 88) {
+          const push = ((88 - rDist) / 88) * 26;
+          e.x = Math.max(36, Math.min(this.arenaWidth - 36, e.x + (rdx / rDist) * push));
+          e.y = Math.max(36, Math.min(this.arenaHeight - 36, e.y + (rdy / rDist) * push));
+        }
+      }
+    }
 
     if (this.player.buffs.shieldHits > 0) {
       this.player.buffs.shieldHits -= 1;
@@ -1382,7 +1803,9 @@ export class MojiSurvivorEngine {
     if (this.player.exp >= this.player.expNext) {
       this.player.exp -= this.player.expNext;
       this.player.level += 1;
-      this.player.expNext = Math.floor(this.player.expNext * 1.34 + 14);
+      this.player.expNext = Math.floor(
+        this.player.expNext * 1.35 + 14 + this.player.level * 5
+      );
       this.paused = true;
       this.activePointerId = null;
       this.dragVector = { x: 0, y: 0 };
@@ -1398,18 +1821,19 @@ export class MojiSurvivorEngine {
     return shuffled.map((def) => {
       const owned = this.player.weapons.find((w) => w.id === def.id);
       const nextLevel = owned ? owned.level + 1 : 1;
-      const projDmg = owned ? Math.round(owned.damage * 1.36) : def.baseDamage;
-      const projCd = owned
-        ? Number(Math.max(0.24, owned.cooldown * 0.88).toFixed(2))
-        : def.baseCooldown;
+      const stats = computeWeaponStatsForLevel(def.id, nextLevel);
+      const effectiveDamage = Math.round(stats.damage * this.player.damageMultiplier);
+      const effectiveCooldown = Number(
+        (stats.cooldown / this.player.fireRateHaste).toFixed(2)
+      );
       return {
         id: def.id,
         baseName: def.tiers[0],
         evolvedName: getWeaponDisplayName(def.id, nextLevel),
         nextLevel,
         isMerge: Boolean(owned),
-        projectedDamage: projDmg,
-        projectedCooldown: projCd,
+        projectedDamage: effectiveDamage,
+        projectedCooldown: effectiveCooldown,
         description: owned
           ? `Merge duplicate ${getWeaponDisplayName(def.id, owned.level)} into ${getWeaponDisplayName(def.id, nextLevel)}.`
           : def.description,
@@ -1417,7 +1841,8 @@ export class MojiSurvivorEngine {
     });
   }
 
-  private finishRun(): void {
+  public finishRun(): void {
+    if (!this.running) return;
     this.running = false;
     retroAudio.playGameOver();
     this.flushCheckpoint(true);
@@ -1469,7 +1894,7 @@ export class MojiSurvivorEngine {
       })),
       boss: this.activeBoss
         ? {
-            name: `:${this.activeBoss.trait.shortcode}:`,
+            name: `#${this.activeBoss.trait.hash.slice(0, 6)}`,
             hp: Math.max(0, Math.round(this.activeBoss.hp)),
             maxHp: this.activeBoss.maxHp,
             tier: this.activeBoss.trait.tier,
@@ -1506,26 +1931,52 @@ export class MojiSurvivorEngine {
     ctx.save();
     ctx.translate(-camX, -camY);
 
-    // Subtle coordinate grid + arena perimeter
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.045)';
-    ctx.lineWidth = 1;
-    const gridStep = 90;
-    const startX = Math.max(0, Math.floor(camX / gridStep) * gridStep);
-    const endX = Math.min(this.arenaWidth, camX + viewW + gridStep);
-    const startY = Math.max(0, Math.floor(camY / gridStep) * gridStep);
-    const endY = Math.min(this.arenaHeight, camY + viewH + gridStep);
+    // Retro 16-bit BreBre Colors pixel-art arena tilemap + double-pixel perimeter
+    const tileCanvas = getArenaPixelTileCanvas(this.settings.arenaBgStyle, this.wave);
+    if (tileCanvas) {
+      const tileSize = tileCanvas.width; // 256px
+      const startTileX = Math.max(0, Math.floor(camX / tileSize) * tileSize);
+      const endTileX = Math.min(this.arenaWidth, camX + viewW + tileSize);
+      const startTileY = Math.max(0, Math.floor(camY / tileSize) * tileSize);
+      const endTileY = Math.min(this.arenaHeight, camY + viewH + tileSize);
 
-    ctx.beginPath();
-    for (let gx = startX; gx <= endX; gx += gridStep) {
-      ctx.moveTo(gx, 0);
-      ctx.lineTo(gx, this.arenaHeight);
-    }
-    for (let gy = startY; gy <= endY; gy += gridStep) {
-      ctx.moveTo(0, gy);
-      ctx.lineTo(this.arenaWidth, gy);
-    }
-    ctx.stroke();
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.beginPath();
+      ctx.rect(0, 0, this.arenaWidth, this.arenaHeight);
+      ctx.clip();
 
+      for (let tx = startTileX; tx < endTileX; tx += tileSize) {
+        for (let ty = startTileY; ty < endTileY; ty += tileSize) {
+          ctx.drawImage(tileCanvas, tx, ty, tileSize, tileSize);
+        }
+      }
+      ctx.restore();
+    } else {
+      ctx.strokeStyle = 'rgba(154, 9, 87, 0.28)';
+      ctx.lineWidth = 1;
+      const gridStep = 90;
+      const startX = Math.max(0, Math.floor(camX / gridStep) * gridStep);
+      const endX = Math.min(this.arenaWidth, camX + viewW + gridStep);
+      const startY = Math.max(0, Math.floor(camY / gridStep) * gridStep);
+      const endY = Math.min(this.arenaHeight, camY + viewH + gridStep);
+
+      ctx.beginPath();
+      for (let gx = startX; gx <= endX; gx += gridStep) {
+        ctx.moveTo(gx, 0);
+        ctx.lineTo(gx, this.arenaHeight);
+      }
+      for (let gy = startY; gy <= endY; gy += gridStep) {
+        ctx.moveTo(0, gy);
+        ctx.lineTo(this.arenaWidth, gy);
+      }
+      ctx.stroke();
+    }
+
+    // BreBre Colors double-pixel arena boundary (#5B0633 outer frame + #FF1493 inner barrier)
+    ctx.strokeStyle = '#9A0957';
+    ctx.lineWidth = 5;
+    ctx.strokeRect(-2, -2, this.arenaWidth + 4, this.arenaHeight + 4);
     ctx.strokeStyle = '#FF1493';
     ctx.lineWidth = 2;
     ctx.strokeRect(0, 0, this.arenaWidth, this.arenaHeight);
@@ -1620,6 +2071,29 @@ export class MojiSurvivorEngine {
       ctx.restore();
     }
 
+    // Telegraphed Target-Lock Mortar Hazard Rings (Crimson Reticle + Countdown Fill)
+    for (const h of this.hazards) {
+      const pct = 1 - Math.max(0, h.fuse / h.maxFuse);
+      ctx.save();
+      ctx.fillStyle = `rgba(255, 36, 66, ${0.08 + pct * 0.18})`;
+      ctx.strokeStyle = '#FF2442';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, h.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Shrinking lock-on inner ring
+      ctx.setLineDash([]);
+      ctx.strokeStyle = '#FFCCD5';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, Math.max(6, h.radius * (1 - pct)), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     // Shockwave rings (Player Indigo Nova vs Enemy Crimson Hazard)
     for (const sw of this.shockwaves) {
       ctx.save();
@@ -1638,7 +2112,7 @@ export class MojiSurvivorEngine {
     // Player Garlic Aura (Orchid Violet harmonic perimeter)
     const garlic = this.player.weapons.find((w) => w.id === 'garlic_aura');
     if (garlic) {
-      const r = garlic.range + garlic.level * 18;
+      const r = Math.min(145, garlic.range + garlic.level * 10);
       ctx.save();
       ctx.fillStyle = 'rgba(192, 132, 252, 0.07)';
       ctx.strokeStyle = 'rgba(192, 132, 252, 0.38)';
@@ -1653,9 +2127,9 @@ export class MojiSurvivorEngine {
     // Player Orbiting Blades (Spinning Emerald-Teal Chakram Diamonds)
     const blades = this.player.weapons.find((w) => w.id === 'orbiting_blades');
     if (blades) {
-      const bladeCount = blades.level + 1;
-      const spin = performance.now() / 420;
-      const orbitRadius = blades.range + blades.level * 6;
+      const bladeCount = Math.min(5, 1 + blades.level);
+      const spin = performance.now() / 360;
+      const orbitRadius = Math.min(104, blades.range + blades.level * 5);
 
       ctx.save();
       ctx.strokeStyle = 'rgba(16, 185, 129, 0.16)';
@@ -1750,8 +2224,10 @@ export class MojiSurvivorEngine {
       ctx.restore();
     }
 
-    // Enemies (Live NIP-30 custom emojis + tier rings + reserve Nostr sprites)
+    // Enemies (Live NIP-30 custom emojis + tier rings + animated DOM <img> sprites)
+    const activeEnemyUids = new Set<number>();
     for (const e of this.enemies) {
+      activeEnemyUids.add(e.uid);
       ctx.save();
       if (e.isBoss) {
         ctx.strokeStyle = '#FF2442';
@@ -1765,6 +2241,12 @@ export class MojiSurvivorEngine {
         ctx.beginPath();
         ctx.arc(e.x, e.y, e.radius + 10, 0, Math.PI * 2);
         ctx.stroke();
+      } else if (e.isElite) {
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.radius + 4, 0, Math.PI * 2);
+        ctx.stroke();
       } else if (e.trait.tier === 'Apex' || e.trait.tier === 'Rare') {
         ctx.strokeStyle =
           e.trait.tier === 'Apex'
@@ -1776,36 +2258,89 @@ export class MojiSurvivorEngine {
         ctx.stroke();
       }
 
-      const img = this.callbacks.getImage(e.trait.url);
-      if (img && img.complete && img.naturalWidth > 0) {
-        const size = e.radius * 2;
-        ctx.drawImage(img, e.x - e.radius, e.y - e.radius, size, size);
-      } else {
-        ctx.fillStyle = '#1A1A1A';
-        ctx.strokeStyle = '#FF2442';
-        ctx.lineWidth = 2;
+      // Subtle dark translucent shadow halo under the emoji so animated GIF transparency stays clean
+      if (this.settings.opaqueAssetBacking !== false) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.strokeStyle = e.isBoss
+          ? '#FF1493'
+          : e.isElite
+            ? 'rgba(255, 182, 217, 0.65)'
+            : 'rgba(154, 9, 87, 0.45)';
+        ctx.lineWidth = 1.25;
         ctx.beginPath();
-        ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
+        ctx.arc(e.x, e.y, e.radius + 1.5, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       }
 
-      if (e.hitFlash > 0 && this.settings.flashingEffects && !this.settings.reducedMotion) {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.48)';
-        ctx.beginPath();
-        ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
-        ctx.fill();
+      if (this.spriteLayerEl) {
+        let spriteEl = this.enemySpriteEls.get(e.uid);
+        if (!spriteEl) {
+          spriteEl = document.createElement('img');
+          spriteEl.src = e.trait.url;
+          spriteEl.alt = '';
+          spriteEl.referrerPolicy = 'no-referrer';
+          spriteEl.style.position = 'absolute';
+          spriteEl.style.left = '0px';
+          spriteEl.style.top = '0px';
+          spriteEl.style.pointerEvents = 'none';
+          spriteEl.style.userSelect = 'none';
+          spriteEl.style.objectFit = 'contain';
+          spriteEl.style.willChange = 'transform';
+          this.spriteLayerEl.appendChild(spriteEl);
+          this.enemySpriteEls.set(e.uid, spriteEl);
+        }
+
+        const size = e.radius * 2;
+        const sx = e.x - camX - e.radius;
+        const sy = e.y - camY - e.radius;
+        if (sx + size < -24 || sx > viewW + 24 || sy + size < -24 || sy > viewH + 24) {
+          spriteEl.style.display = 'none';
+        } else {
+          spriteEl.style.display = 'block';
+          spriteEl.style.width = `${size}px`;
+          spriteEl.style.height = `${size}px`;
+          spriteEl.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0)`;
+          spriteEl.style.filter =
+            e.hitFlash > 0 && this.settings.flashingEffects && !this.settings.reducedMotion
+              ? 'brightness(2.2) contrast(1.2)'
+              : 'none';
+        }
+      } else {
+        const img = this.callbacks.getImage(e.trait.url);
+        if (img && img.complete && img.naturalWidth > 0) {
+          const size = e.radius * 2;
+          ctx.drawImage(img, e.x - e.radius, e.y - e.radius, size, size);
+        } else {
+          ctx.fillStyle = '#1A1A1A';
+          ctx.strokeStyle = '#FF1493';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
       }
 
       if (e.hp < e.maxHp && !e.isBoss) {
         const bw = e.radius * 1.8;
         const pct = Math.max(0, e.hp / e.maxHp);
-        ctx.fillStyle = 'rgba(0,0,0,0.8)';
-        ctx.fillRect(e.x - bw / 2, e.y - e.radius - 8, bw, 4);
-        ctx.fillStyle = '#FF2442';
-        ctx.fillRect(e.x - bw / 2, e.y - e.radius - 8, bw * pct, 4);
+        ctx.fillStyle = '#111111';
+        ctx.fillRect(e.x - bw / 2, e.y - e.radius - 9, bw, 4);
+        ctx.fillStyle = '#FF1493';
+        ctx.fillRect(e.x - bw / 2, e.y - e.radius - 9, bw * pct, 4);
       }
       ctx.restore();
+    }
+
+    // Prune defeated enemy DOM <img> nodes immediately
+    if (this.enemySpriteEls.size > 0) {
+      for (const [uid, el] of this.enemySpriteEls.entries()) {
+        if (!activeEnemyUids.has(uid)) {
+          el.remove();
+          this.enemySpriteEls.delete(uid);
+        }
+      }
     }
 
     // Player character & color-matched active buff rings
@@ -1825,16 +2360,42 @@ export class MojiSurvivorEngine {
       ctx.stroke();
     }
 
-    ctx.fillStyle = '#111111';
+    // Subtle dark player pedestal ring
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
     ctx.strokeStyle = '#00F0FF';
     ctx.lineWidth = 2.5;
     ctx.beginPath();
-    ctx.arc(this.player.x, this.player.y, this.player.radius, 0, Math.PI * 2);
+    ctx.arc(this.player.x, this.player.y, this.player.radius + 1.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
 
     const avatar = this.callbacks.getPlayerAvatar();
-    if (avatar && avatar.complete && avatar.naturalWidth > 0) {
+    if (this.spriteLayerEl && avatar && avatar.src) {
+      if (!this.playerSpriteEl) {
+        const pEl = document.createElement('img');
+        pEl.src = avatar.src;
+        pEl.alt = '';
+        pEl.referrerPolicy = 'no-referrer';
+        pEl.style.position = 'absolute';
+        pEl.style.left = '0px';
+        pEl.style.top = '0px';
+        pEl.style.borderRadius = '9999px';
+        pEl.style.objectFit = 'cover';
+        pEl.style.pointerEvents = 'none';
+        pEl.style.userSelect = 'none';
+        pEl.style.willChange = 'transform';
+        this.spriteLayerEl.appendChild(pEl);
+        this.playerSpriteEl = pEl;
+      } else if (this.playerSpriteEl.src !== avatar.src) {
+        this.playerSpriteEl.src = avatar.src;
+      }
+      const pSize = (this.player.radius - 1.5) * 2;
+      const px = this.player.x - camX - pSize / 2;
+      const py = this.player.y - camY - pSize / 2;
+      this.playerSpriteEl.style.width = `${pSize}px`;
+      this.playerSpriteEl.style.height = `${pSize}px`;
+      this.playerSpriteEl.style.transform = `translate3d(${px.toFixed(1)}px, ${py.toFixed(1)}px, 0)`;
+    } else if (avatar && avatar.complete && avatar.naturalWidth > 0) {
       ctx.save();
       ctx.beginPath();
       ctx.arc(this.player.x, this.player.y, this.player.radius - 2, 0, Math.PI * 2);
@@ -1843,7 +2404,7 @@ export class MojiSurvivorEngine {
       ctx.drawImage(avatar, this.player.x - s / 2, this.player.y - s / 2, s, s);
       ctx.restore();
     } else {
-      ctx.fillStyle = '#00F0FF';
+      ctx.fillStyle = '#FF1493';
       ctx.beginPath();
       ctx.arc(this.player.x, this.player.y, 7, 0, Math.PI * 2);
       ctx.fill();

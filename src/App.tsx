@@ -1,9 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, ChevronRight, RotateCcw, AlertTriangle } from 'lucide-react';
-import defaultAvatarUrl from './assets/images/moji_survivor_emblem_1793749794956.jpg';
-import lobbyBackdropUrl from './assets/images/arena_lobby_backdrop_1793749795243.jpg';
+import { Play, ChevronRight, RotateCcw, AlertTriangle, ArrowRight } from 'lucide-react';
 import { ArenaView } from './components/ArenaView';
 import { CodexView } from './components/CodexView';
+import { FirstLoadWarningModal } from './components/FirstLoadWarningModal';
 import {
   IdentitySettingsView,
   type AccordionPanel,
@@ -18,7 +17,17 @@ import type {
   CompletedRunSummary,
   RunProgressCheckpointPayload,
 } from './lib/gameEngine';
+import {
+  normalizeEmojiHash,
+  normalizePubkeyOrNpub,
+  type EmojiFilterMode,
+} from './lib/moderationLists';
 import { formatShortNpub, MojiNostrCoordinator } from './lib/nostrEngine';
+import {
+  ARENA_PIXEL_BG_OPTIONS,
+  getLobbyPixelBannerDataUrl,
+  MOJI_APP_ICON_URL,
+} from './lib/pixelBackgrounds';
 import {
   applyRunCheckpointToState,
   getUpgradeCost,
@@ -51,7 +60,14 @@ export default function App() {
   const [globalNotice, setGlobalNotice] = useState<string | null>(null);
 
   const [coordinator] = useState<MojiNostrCoordinator>(
-    () => new MojiNostrCoordinator(initialBoot.state.relays, initialBoot.state.codex)
+    () =>
+      new MojiNostrCoordinator(initialBoot.state.relays, initialBoot.state.codex, {
+        emojiFilterMode: initialBoot.state.settings.emojiFilterMode,
+        nsfwBanPubkeys: initialBoot.state.nsfwBanPubkeys,
+        nsfwBanEmojiHashes: initialBoot.state.nsfwBanEmojiHashes,
+        safePackAuthors: initialBoot.state.safePackAuthors,
+        blockedEmojiKeys: initialBoot.state.blockedEmojiKeys,
+      })
   );
   const [nostrTick, setNostrTick] = useState(0);
   const [destination, setDestination] = useState<Destination>('lobby');
@@ -120,6 +136,11 @@ export default function App() {
     },
     [flushPersistedNow]
   );
+
+  // Persist cleaned/migrated state on boot so purged legacy SVG placeholders never linger in storage
+  useEffect(() => {
+    savePersistedState(initialBoot.state);
+  }, [initialBoot.state]);
 
   // Flush any pending batched Codex writes on visibility change, pagehide, or unload
   useEffect(() => {
@@ -794,6 +815,281 @@ export default function App() {
     [commitPersisted]
   );
 
+  const handleAcceptContentWarning = useCallback(
+    (selectedMode: EmojiFilterMode) => {
+      commitPersisted(
+        (prev) => ({
+          ...prev,
+          contentWarningAcceptedAt: Date.now(),
+          settings: {
+            ...prev.settings,
+            emojiFilterMode: selectedMode,
+          },
+        }),
+        { immediate: true }
+      );
+    },
+    [commitPersisted]
+  );
+
+  const handleChangeFilterMode = useCallback(
+    (emojiFilterMode: EmojiFilterMode) => {
+      handleUpdateSettings({
+        ...persistedRef.current.settings,
+        emojiFilterMode,
+      });
+    },
+    [handleUpdateSettings]
+  );
+
+  const handleReportAndBanEmojiHash = useCallback(
+    (opts: {
+      emojiHash: string;
+      targetPubkeyOrNpub?: string;
+      packTitle?: string;
+      packDTag?: string;
+    }) => {
+      const cleanHash = normalizeEmojiHash(opts.emojiHash);
+      if (!cleanHash) {
+        setGlobalNotice('Enter a valid 64-character SHA-256 emoji hex hash.');
+        return;
+      }
+
+      commitPersisted(
+        (prev) => {
+          const nextHashBans = Array.from(
+            new Set([...prev.nsfwBanEmojiHashes, cleanHash])
+          );
+          const removedUrls = new Set<string>();
+          const nextCodex: typeof prev.codex = {};
+          for (const [k, rec] of Object.entries(prev.codex)) {
+            if (rec.hash?.toLowerCase() === cleanHash) {
+              removedUrls.add(rec.url);
+              continue;
+            }
+            nextCodex[k] = rec;
+          }
+          const nextReceipts = prev.localReceipts.map((r) =>
+            r.featuredEmoji &&
+            (r.featuredEmoji.hash?.toLowerCase() === cleanHash ||
+              removedUrls.has(r.featuredEmoji.url))
+              ? { ...r, featuredEmoji: undefined }
+              : r
+          );
+          return {
+            ...prev,
+            revision: prev.revision + 1,
+            nsfwBanEmojiHashes: nextHashBans,
+            codex: nextCodex,
+            localReceipts: nextReceipts,
+          };
+        },
+        { immediate: true }
+      );
+
+      setGlobalNotice(
+        `Privately banned hash #${cleanHash.slice(0, 8)} on this device and publishing anonymous NSFW hash report…`
+      );
+
+      void coordinator
+        .publishAnonymousModerationReport({
+          verdict: 'nsfw_hash',
+          emojiHash: cleanHash,
+          targetPubkeyOrNpub: opts.targetPubkeyOrNpub,
+          packTitle: opts.packTitle,
+          packDTag: opts.packDTag,
+        })
+        .then((res) => {
+          if (res.ok && res.acceptedRelays.length > 0) {
+            setGlobalNotice(
+              `Banned hash #${cleanHash.slice(0, 8)} privately & published anonymous report to ${res.acceptedRelays.length} relay(s).`
+            );
+          } else {
+            setGlobalNotice(
+              `Banned hash #${cleanHash.slice(0, 8)} privately on your device.`
+            );
+          }
+        });
+    },
+    [commitPersisted, coordinator]
+  );
+
+  const handleUnbanEmojiHash = useCallback(
+    (emojiHash: string) => {
+      const cleanHash = normalizeEmojiHash(emojiHash);
+      if (!cleanHash) return;
+      commitPersisted(
+        (prev) => ({
+          ...prev,
+          revision: prev.revision + 1,
+          nsfwBanEmojiHashes: prev.nsfwBanEmojiHashes.filter((h) => h !== cleanHash),
+        }),
+        { immediate: true }
+      );
+      setGlobalNotice(`Removed hash #${cleanHash.slice(0, 8)} from NSFW Hash Ban List.`);
+    },
+    [commitPersisted]
+  );
+
+  const handleReportAndBanAuthor = useCallback(
+    (opts: {
+      pubkeyOrNpub: string;
+      packTitle?: string;
+      packDTag?: string;
+      emojiHash?: string;
+    }) => {
+      const targetHex = normalizePubkeyOrNpub(opts.pubkeyOrNpub);
+      if (!targetHex) {
+        setGlobalNotice('Invalid npub1… or 64-character hex public key.');
+        return;
+      }
+      const cleanHash = opts.emojiHash ? normalizeEmojiHash(opts.emojiHash) : null;
+
+      commitPersisted(
+        (prev) => {
+          const nextBans = Array.from(new Set([...prev.nsfwBanPubkeys, targetHex]));
+          const nextHashBans = cleanHash
+            ? Array.from(new Set([...prev.nsfwBanEmojiHashes, cleanHash]))
+            : prev.nsfwBanEmojiHashes;
+          const nextSafe = prev.safePackAuthors.filter((p) => p !== targetHex);
+          const removedUrls = new Set<string>();
+          const nextCodex: typeof prev.codex = {};
+          for (const [k, rec] of Object.entries(prev.codex)) {
+            if (
+              rec.packAuthor?.toLowerCase() === targetHex ||
+              (cleanHash && rec.hash?.toLowerCase() === cleanHash)
+            ) {
+              removedUrls.add(rec.url);
+              continue;
+            }
+            nextCodex[k] = rec;
+          }
+          const nextReceipts = prev.localReceipts.map((r) =>
+            r.featuredEmoji &&
+            (removedUrls.has(r.featuredEmoji.url) ||
+              (cleanHash && r.featuredEmoji.hash?.toLowerCase() === cleanHash))
+              ? { ...r, featuredEmoji: undefined }
+              : r
+          );
+          return {
+            ...prev,
+            revision: prev.revision + 1,
+            nsfwBanPubkeys: nextBans,
+            nsfwBanEmojiHashes: nextHashBans,
+            safePackAuthors: nextSafe,
+            codex: nextCodex,
+            localReceipts: nextReceipts,
+          };
+        },
+        { immediate: true }
+      );
+
+      setGlobalNotice(
+        `Privately banned ${formatShortNpub(targetHex)} on this device and publishing anonymous NSFW report…`
+      );
+
+      void coordinator
+        .publishAnonymousModerationReport({
+          targetPubkeyOrNpub: targetHex,
+          verdict: 'nsfw_ban',
+          packTitle: opts.packTitle,
+          packDTag: opts.packDTag,
+          emojiHash: cleanHash ?? undefined,
+        })
+        .then((res) => {
+          if (res.ok && res.acceptedRelays.length > 0) {
+            setGlobalNotice(
+              `Banned ${formatShortNpub(targetHex)} privately & published anonymous NSFW report to ${res.acceptedRelays.length} relay(s).`
+            );
+          } else {
+            setGlobalNotice(
+              `Banned ${formatShortNpub(targetHex)} privately on your device.`
+            );
+          }
+        });
+    },
+    [commitPersisted, coordinator]
+  );
+
+  const handleUnbanAuthor = useCallback(
+    (pubkeyHex: string) => {
+      const target = normalizePubkeyOrNpub(pubkeyHex);
+      if (!target) return;
+      commitPersisted(
+        (prev) => ({
+          ...prev,
+          revision: prev.revision + 1,
+          nsfwBanPubkeys: prev.nsfwBanPubkeys.filter((p) => p !== target),
+        }),
+        { immediate: true }
+      );
+      setGlobalNotice(`Removed ${formatShortNpub(target)} from local NSFW Ban List.`);
+    },
+    [commitPersisted]
+  );
+
+  const handleAddSafeAuthor = useCallback(
+    (opts: {
+      pubkeyOrNpub: string;
+      packTitle?: string;
+      packDTag?: string;
+      emojiHash?: string;
+      publishNomination?: boolean;
+    }) => {
+      const targetHex = normalizePubkeyOrNpub(opts.pubkeyOrNpub);
+      if (!targetHex) {
+        setGlobalNotice('Invalid npub1… or 64-character hex public key.');
+        return;
+      }
+
+      commitPersisted(
+        (prev) => ({
+          ...prev,
+          revision: prev.revision + 1,
+          safePackAuthors: Array.from(new Set([...prev.safePackAuthors, targetHex])),
+          nsfwBanPubkeys: prev.nsfwBanPubkeys.filter((p) => p !== targetHex),
+          progressSync: prev.progressSync.enabled
+            ? { ...prev.progressSync, dirty: true }
+            : prev.progressSync,
+        }),
+        { immediate: true }
+      );
+
+      if (opts.publishNomination !== false) {
+        void coordinator.publishAnonymousModerationReport({
+          targetPubkeyOrNpub: targetHex,
+          verdict: 'safe_nomination',
+          packTitle: opts.packTitle,
+          packDTag: opts.packDTag,
+          emojiHash: opts.emojiHash,
+        });
+      }
+
+      setGlobalNotice(`Added ${formatShortNpub(targetHex)} to Verified Safe List.`);
+    },
+    [commitPersisted, coordinator]
+  );
+
+  const handleRemoveSafeAuthor = useCallback(
+    (pubkeyHex: string) => {
+      const target = normalizePubkeyOrNpub(pubkeyHex);
+      if (!target) return;
+      commitPersisted(
+        (prev) => ({
+          ...prev,
+          revision: prev.revision + 1,
+          safePackAuthors: prev.safePackAuthors.filter((p) => p !== target),
+          progressSync: prev.progressSync.enabled
+            ? { ...prev.progressSync, dirty: true }
+            : prev.progressSync,
+        }),
+        { immediate: true }
+      );
+      setGlobalNotice(`Removed ${formatShortNpub(target)} from Safe List.`);
+    },
+    [commitPersisted]
+  );
+
   const handleChangeCodexViewMode = useCallback(
     (codexViewMode: CodexViewMode) => {
       commitPersisted(
@@ -810,20 +1106,85 @@ export default function App() {
     [commitPersisted]
   );
 
+  // Sync live SHA-256 Hash Ban List, npub Ban List, Safe List & filter mode into Nostr coordinator
+  useEffect(() => {
+    coordinator.updateModerationPolicy({
+      emojiFilterMode: persisted.settings.emojiFilterMode,
+      nsfwBanPubkeys: persisted.nsfwBanPubkeys,
+      nsfwBanEmojiHashes: persisted.nsfwBanEmojiHashes,
+      safePackAuthors: persisted.safePackAuthors,
+      blockedEmojiKeys: persisted.blockedEmojiKeys,
+    });
+  }, [
+    coordinator,
+    persisted.settings.emojiFilterMode,
+    persisted.nsfwBanPubkeys,
+    persisted.nsfwBanEmojiHashes,
+    persisted.safePackAuthors,
+    persisted.blockedEmojiKeys,
+  ]);
+
   // Merge offline-persisted Codex unlocks into coordinator's emoji map so Arena & Codex always include them
   useEffect(() => {
     coordinator.hydrateEmojisFromCodex(persisted.codex);
   }, [coordinator, persisted.codex]);
 
+  const isEmojiAllowedCallback = useCallback(
+    (trait: EmojiCombatTrait) => coordinator.isEmojiAllowed(trait),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      coordinator,
+      nostrTick,
+      persisted.settings.emojiFilterMode,
+      persisted.nsfwBanPubkeys,
+      persisted.nsfwBanEmojiHashes,
+      persisted.safePackAuthors,
+      persisted.blockedEmojiKeys,
+    ]
+  );
+
   const allEmojis = useMemo(
     () => Array.from(coordinator.emojis.values()),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [coordinator, nostrTick, persisted.codex]
+    [
+      coordinator,
+      nostrTick,
+      persisted.codex,
+      persisted.settings.emojiFilterMode,
+      persisted.nsfwBanPubkeys,
+      persisted.nsfwBanEmojiHashes,
+      persisted.safePackAuthors,
+      persisted.blockedEmojiKeys,
+    ]
+  );
+
+  const effectiveBannedSet = useMemo(
+    () => coordinator.getEffectiveBannedPubkeys(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [coordinator, nostrTick, persisted.nsfwBanPubkeys]
+  );
+
+  const effectiveBannedHashesSet = useMemo(
+    () => coordinator.getEffectiveBannedEmojiHashes(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [coordinator, nostrTick, persisted.nsfwBanEmojiHashes]
+  );
+
+  const effectiveSafeSet = useMemo(
+    () => coordinator.getEffectiveSafePubkeys(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [coordinator, nostrTick, persisted.safePackAuthors]
+  );
+
+  const relayModerationReports = useMemo(
+    () => coordinator.getSortedModerationReports(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [coordinator, nostrTick]
   );
 
   const liveNip30Count = useMemo(
-    () => allEmojis.filter((e) => e.source === 'nip30').length,
-    [allEmojis]
+    () => allEmojis.filter((e) => e.source === 'nip30' && isEmojiAllowedCallback(e)).length,
+    [allEmojis, isEmojiAllowedCallback]
   );
 
   const sortedLeaderboard = useMemo(
@@ -841,11 +1202,15 @@ export default function App() {
   const activeProfile = coordinator.profiles.get(coordinator.pubkey);
   const discoveredCount = Object.values(persisted.codex).filter((r) => r.kills > 0).length;
   const totalKnownCodexCount = useMemo(() => {
-    const keys = new Set<string>(allEmojis.map((e) => e.emojiKey));
+    const keys = new Set<string>(
+      allEmojis.filter((e) => isEmojiAllowedCallback(e)).map((e) => e.emojiKey)
+    );
     for (const k of Object.keys(persisted.codex)) keys.add(k);
     return keys.size;
-  }, [allEmojis, persisted.codex]);
+  }, [allEmojis, isEmojiAllowedCallback, persisted.codex]);
   const isSignedIn = coordinator.isSignedIn();
+  const defaultAvatarUrl = MOJI_APP_ICON_URL;
+  const lobbyPixelBannerUrl = useMemo(() => getLobbyPixelBannerDataUrl(), []);
 
   if (destination === 'arena') {
     return (
@@ -875,19 +1240,28 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-black text-white flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+      {persisted.contentWarningAcceptedAt === null && (
+        <FirstLoadWarningModal onAccept={handleAcceptContentWarning} />
+      )}
+
       {persisted.settings.crtScanlines && (
         <div className="pointer-events-none fixed inset-0 crt-scanlines opacity-30 z-40" />
       )}
 
-      {/* Compact Sticky Top Chrome */}
-      <div className="sticky top-0 z-30 bg-black border-b border-white/10">
+      {/* Compact Sticky Top Chrome — BreBre Colors UI Standards */}
+      <div className="sticky top-0 z-30 bg-[#000000] border-b border-[#9A0957]/45">
         <header className="max-w-5xl mx-auto flex items-center justify-between gap-6 px-4 py-2">
           <button
             type="button"
             onClick={() => navigateTo('lobby')}
-            className="text-base font-display font-bold tracking-tight text-white hover:text-[#FF1493] transition-colors whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-2 text-base font-display font-bold tracking-tight text-white hover:text-[#FFB6D9] transition-colors whitespace-nowrap shrink-0"
           >
-            MojiSurvivor
+            <img
+              src={MOJI_APP_ICON_URL}
+              alt="MojiSurvivor emblem"
+              className="w-7 h-7 rounded-md border border-[#FF1493]/70 object-cover shrink-0"
+            />
+            <span>MojiSurvivor</span>
           </button>
 
           <nav
@@ -911,8 +1285,8 @@ export default function App() {
                 }
                 className={`py-1.5 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
                   destination === dest
-                    ? 'text-white border-[#FF1493]'
-                    : 'border-transparent hover:text-white'
+                    ? 'text-white border-[#FF1493] font-semibold'
+                    : 'border-transparent hover:text-[#FFB6D9]'
                 }`}
               >
                 {label}
@@ -926,16 +1300,19 @@ export default function App() {
               onClick={() =>
                 navigateTo('arena', { checkpoint: activeRunCheckpoint ?? null })
               }
-              className="min-h-[38px] px-3.5 py-1.5 rounded-md bg-[#FF1493] hover:bg-[#CD0D72] text-xs font-semibold text-white transition-colors whitespace-nowrap shrink-0"
+              className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] text-xs font-semibold text-white transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
             >
-              {activeRunCheckpoint ? `Resume W${activeRunCheckpoint.wave}` : 'Start Run'}
+              <span>
+                {activeRunCheckpoint ? `Resume W${activeRunCheckpoint.wave}` : 'Start Run'}
+              </span>
+              <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </header>
 
         <nav
           aria-label="Mobile navigation"
-          className="md:hidden grid grid-cols-5 border-t border-white/10 bg-[#0A0A0A] px-2"
+          className="md:hidden grid grid-cols-5 border-t border-[#5B0633]/80 bg-[#111111] px-2"
         >
           {(
             [
@@ -955,7 +1332,7 @@ export default function App() {
               className={`min-h-[40px] text-center text-xs font-medium whitespace-nowrap border-b-2 transition-colors ${
                 destination === dest
                   ? 'text-white border-[#FF1493] font-semibold'
-                  : 'text-[#B8B8B8] border-transparent hover:text-white'
+                  : 'text-[#B8B8B8] border-transparent hover:text-[#FFB6D9]'
               }`}
             >
               {label}
@@ -967,18 +1344,18 @@ export default function App() {
       {(storageError || globalNotice) && (
         <div className="max-w-5xl w-full mx-auto px-4 pt-3 space-y-2">
           {storageError && (
-            <div className="px-3 py-2 rounded-lg bg-[#111111] border border-amber-500/40 text-xs text-amber-300 flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
+            <div className="px-3 py-2 rounded-lg bg-[#111111] border border-[#FF1493]/50 text-xs text-[#FFB6D9] flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-[#FF1493]" />
               <span>{storageError}</span>
             </div>
           )}
           {globalNotice && (
-            <div className="px-3 py-2 rounded-lg bg-[#111111] border border-[#00F0FF]/40 text-xs text-[#00F0FF] flex items-center justify-between gap-2">
+            <div className="px-3 py-2 rounded-lg bg-[#111111] border border-[#9A0957] text-xs text-[#FFB6D9] flex items-center justify-between gap-2">
               <span>{globalNotice}</span>
               <button
                 type="button"
                 onClick={() => setGlobalNotice(null)}
-                className="text-white/75 hover:text-white text-xs shrink-0"
+                className="text-[#B8B8B8] hover:text-white text-xs shrink-0"
               >
                 Dismiss
               </button>
@@ -991,17 +1368,19 @@ export default function App() {
       <main className="flex-1 pb-16">
         {destination === 'lobby' && (
           <section className="max-w-5xl mx-auto px-4 py-3.5 space-y-3">
-            {/* Hero Arena Card */}
-            <div className="relative rounded-xl overflow-hidden border border-white/15 bg-[#111111]">
-              <img
-                src={lobbyBackdropUrl}
-                alt="Obsidian tactical arena backdrop"
-                className="absolute inset-0 w-full h-full object-cover opacity-35"
-              />
-              <div className="relative bg-gradient-to-r from-black/90 via-black/80 to-black/70 p-4 flex flex-col md:flex-row md:items-center justify-between gap-3.5">
-                <div className="space-y-2 max-w-xl">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-10 h-10 rounded-full bg-black border border-[#FF1493] overflow-hidden shrink-0">
+            {/* Hero Arena Card — BreBre Colors Pixel-Art Horizon + App Emblem */}
+            <div className="relative rounded-2xl overflow-hidden border border-[#9A0957]/65 bg-[#111111]">
+              {lobbyPixelBannerUrl && (
+                <img
+                  src={lobbyPixelBannerUrl}
+                  alt="BreBre retro pixel-art arena horizon"
+                  className="absolute inset-0 w-full h-full object-cover opacity-55 pixelated"
+                />
+              )}
+              <div className="relative bg-gradient-to-r from-[#000000]/92 via-[#000000]/82 to-[#111111]/75 p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="space-y-2.5 max-w-xl">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-xl emoji-opaque-pod p-0.5 overflow-hidden shrink-0">
                       <img
                         src={activeProfile?.picture || defaultAvatarUrl}
                         alt="Active player persona"
@@ -1009,7 +1388,7 @@ export default function App() {
                         onError={(e) => {
                           (e.currentTarget as HTMLImageElement).src = defaultAvatarUrl;
                         }}
-                        className="w-full h-full object-cover"
+                        className="w-full h-full rounded-[10px] object-cover"
                       />
                     </div>
                     <div className="min-w-0">
@@ -1021,34 +1400,37 @@ export default function App() {
                           : 'Guest Player'}
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono text-[#B8B8B8]">
-                        <span className="text-[#00F0FF]">
+                        <span className="text-[#FFB6D9] font-semibold">
                           Player Lv.{persisted.playerLevel}
                         </span>
-                        <span aria-hidden="true">·</span>
-                        <span>
-                          {isSignedIn ? coordinator.signerMode.toUpperCase() : 'Not signed in'}
+                        <span aria-hidden="true" className="text-[#5E5E5E]">·</span>
+                        <span className="text-[#C0C0C0]">
+                          {isSignedIn ? coordinator.signerMode.toUpperCase() : 'Local Save'}
                         </span>
-                        <span aria-hidden="true">·</span>
+                        <span aria-hidden="true" className="text-[#5E5E5E]">·</span>
                         <button
                           type="button"
                           onClick={() => openAccountPanel('profile')}
-                          className="text-[#FFB6D9] hover:text-white underline whitespace-nowrap"
+                          className="text-[#FF1493] hover:text-[#FFB6D9] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
                         >
-                          {isSignedIn ? 'Manage Profile & Cloud Save' : 'Sign In'}
+                          <span>{isSignedIn ? 'Cloud Save & Signer' : 'Sign In'}</span>
+                          <span aria-hidden="true">→</span>
                         </button>
                       </div>
                     </div>
                   </div>
 
                   <div>
+                    <div className="w-8 h-1 rounded-full bg-[#FF1493] mb-1.5" />
                     <h1
                       className="text-xl sm:text-2xl font-display font-bold text-white tracking-tight leading-snug"
                       style={{ textWrap: 'balance' }}
                     >
                       NIP-30 Custom Emoji Survivor Arena
                     </h1>
-                    <p className="text-xs text-[#B8B8B8] mt-0.5 leading-relaxed">
-                      Drag anywhere or use WASD to dodge live <code className="font-mono text-white">kind:30030</code> emojis, merge duplicate spells, and broadcast BIP-340 receipts.
+                    <p className="text-xs text-[#B8B8B8] mt-1 leading-relaxed">
+                      Drag anywhere or use WASD to battle cryptographically statted{' '}
+                      <code className="font-mono text-[#FFB6D9]">kind:30030</code> emojis on 16-bit BreBre pixel-art realms with opaque sprite contrast backing.
                     </p>
                   </div>
                 </div>
@@ -1061,12 +1443,13 @@ export default function App() {
                         onClick={() =>
                           navigateTo('arena', { checkpoint: activeRunCheckpoint })
                         }
-                        className="min-h-[44px] px-5 py-2.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] text-sm font-semibold text-white transition-colors inline-flex items-center justify-center gap-2 whitespace-nowrap"
+                        className="min-h-[44px] px-5 py-2.5 rounded-xl bg-[#FF1493] hover:bg-[#CD0D72] text-sm font-semibold text-white transition-colors inline-flex items-center justify-center gap-2 whitespace-nowrap"
                       >
                         <Play className="w-4 h-4 fill-current" />
                         <span>
                           Resume Wave {activeRunCheckpoint.wave} ({activeRunCheckpoint.score.toLocaleString()} pts)
                         </span>
+                        <ArrowRight className="w-4 h-4" />
                       </button>
                       <button
                         type="button"
@@ -1074,9 +1457,9 @@ export default function App() {
                           handleSaveActiveRunCheckpoint(null);
                           navigateTo('arena', { checkpoint: null });
                         }}
-                        className="min-h-[44px] px-4 py-2.5 rounded-lg bg-black/80 border border-white/15 hover:border-white/35 text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                        className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
                       >
-                        <RotateCcw className="w-3.5 h-3.5" />
+                        <RotateCcw className="w-3.5 h-3.5 text-[#FFB6D9]" />
                         <span>New Run</span>
                       </button>
                     </>
@@ -1085,15 +1468,16 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => navigateTo('arena', { checkpoint: null })}
-                        className="min-h-[44px] px-5 py-2.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] text-sm font-semibold text-white transition-colors inline-flex items-center justify-center gap-2 whitespace-nowrap"
+                        className="min-h-[44px] px-5 py-2.5 rounded-xl bg-[#FF1493] hover:bg-[#CD0D72] text-sm font-semibold text-white transition-colors inline-flex items-center justify-center gap-2 whitespace-nowrap"
                       >
                         <Play className="w-4 h-4 fill-current" />
                         <span>Enter Battle Arena</span>
+                        <ArrowRight className="w-4 h-4" />
                       </button>
                       <button
                         type="button"
                         onClick={() => navigateTo('upgrades')}
-                        className="min-h-[44px] px-4 py-2.5 rounded-lg bg-black/80 border border-white/15 hover:border-white/35 text-xs font-semibold text-white transition-colors whitespace-nowrap"
+                        className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] text-xs font-semibold text-white transition-colors whitespace-nowrap"
                       >
                         Upgrades ({persisted.mojoBalance.toLocaleString()} Mojo)
                       </button>
@@ -1103,13 +1487,13 @@ export default function App() {
               </div>
             </div>
 
-            {/* 5-Metric Progression Strip */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 py-2.5 px-3.5 rounded-xl bg-[#111111] border border-white/10 font-mono tabular-nums">
+            {/* 5-Metric Progression Strip — BreBre Colors Palette */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 py-2.5 px-3.5 rounded-xl bg-[#111111] border border-[#9A0957]/45 font-mono tabular-nums">
               <div>
                 <div className="text-xs text-[#B8B8B8] truncate">Player Level</div>
-                <div className="text-sm sm:text-lg font-bold text-[#00F0FF]">
+                <div className="text-sm sm:text-lg font-bold text-[#FF1493]">
                   Lv.{persisted.playerLevel}
-                  <span className="text-xs font-normal text-[#B8B8B8]">
+                  <span className="text-xs font-normal text-[#5E5E5E]">
                     {' '}({persisted.playerXp}/{persisted.playerXpNext})
                   </span>
                 </div>
@@ -1122,7 +1506,7 @@ export default function App() {
               </div>
               <div>
                 <div className="text-xs text-[#B8B8B8] truncate">Best Wave</div>
-                <div className="text-sm sm:text-lg font-bold text-white">
+                <div className="text-sm sm:text-lg font-bold text-[#FFB6D9]">
                   W{persisted.bestWave}
                 </div>
               </div>
@@ -1134,56 +1518,95 @@ export default function App() {
               </div>
               <div className="col-span-2 sm:col-span-1">
                 <div className="text-xs text-[#B8B8B8] truncate">Emoji Pool</div>
-                <div className="text-sm sm:text-lg font-bold text-white">
+                <div className="text-sm sm:text-lg font-bold text-[#C0C0C0]">
                   {totalKnownCodexCount}
-                  <span className="text-xs font-normal text-[#B8B8B8]">
+                  <span className="text-xs font-normal text-[#5E5E5E]">
                     {' '}({liveNip30Count} live)
                   </span>
                 </div>
               </div>
             </div>
 
-            {/* Destination Rows */}
+            {/* Retro Pixel-Art Arena Realm Selector & Opaque Contrast Backing Toggle */}
+            <div className="p-3 rounded-xl bg-[#111111] border border-[#9A0957]/45 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="min-w-0">
+                <div className="text-xs font-display font-bold text-white flex items-center gap-2">
+                  <span>16-Bit BreBre Pixel Arena Background</span>
+                  <span className="text-[11px] font-mono text-[#FFB6D9]">
+                    · Opaque Sprite Backing {persisted.settings.opaqueAssetBacking !== false ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#5E5E5E] truncate">
+                  Retro pixel-art tilemaps in the BreBre Colors palette with high-contrast opaque plates under dark/transparent emojis.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                {ARENA_PIXEL_BG_OPTIONS.map((opt) => {
+                  const active = (persisted.settings.arenaBgStyle ?? 'auto') === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() =>
+                        handleUpdateSettings({
+                          ...persisted.settings,
+                          arenaBgStyle: opt.id,
+                        })
+                      }
+                      className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+                        active
+                          ? 'bg-[#FF1493] text-white font-semibold'
+                          : 'bg-[#000000] border border-[#5B0633] text-[#B8B8B8] hover:border-[#9A0957] hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Destination Cards — BreBre Colors Card Specimen */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <button
                 type="button"
                 onClick={() => navigateTo('codex')}
-                className="text-left px-3.5 py-3 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3"
+                className="text-left px-4 py-3.5 rounded-xl bg-[#111111] border border-[#9A0957]/45 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3 group"
               >
                 <div className="min-w-0">
-                  <div className="text-sm font-display font-bold text-white truncate">
+                  <div className="text-sm font-display font-bold text-white group-hover:text-[#FFB6D9] transition-colors truncate">
                     Emoji Codex · {discoveredCount}/{totalKnownCodexCount}
                   </div>
                   <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
-                    Gallery & Stats views · Offline unlocks preserved
+                    Opaque contrast pods · SHA-256 hash unlocks
                   </p>
                 </div>
-                <ChevronRight className="w-4 h-4 text-[#B8B8B8] shrink-0" />
+                <ChevronRight className="w-4 h-4 text-[#FF1493] shrink-0" />
               </button>
 
               <button
                 type="button"
                 onClick={() => navigateTo('leaderboard')}
-                className="text-left px-3.5 py-3 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3"
+                className="text-left px-4 py-3.5 rounded-xl bg-[#111111] border border-[#9A0957]/45 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3 group"
               >
                 <div className="min-w-0">
-                  <div className="text-sm font-display font-bold text-white truncate">
+                  <div className="text-sm font-display font-bold text-white group-hover:text-[#FFB6D9] transition-colors truncate">
                     Leaderboard · {sortedLeaderboard.length} verified
                   </div>
                   <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
-                    BIP-340 relay receipts & shareable PNG score cards
+                    BIP-340 relay receipts & pixel PNG score cards
                   </p>
                 </div>
-                <ChevronRight className="w-4 h-4 text-[#B8B8B8] shrink-0" />
+                <ChevronRight className="w-4 h-4 text-[#FF1493] shrink-0" />
               </button>
 
               <button
                 type="button"
                 onClick={() => openAccountPanel('profile')}
-                className="text-left px-3.5 py-3 rounded-xl bg-[#111111] border border-white/10 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3"
+                className="text-left px-4 py-3.5 rounded-xl bg-[#111111] border border-[#9A0957]/45 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3 group"
               >
                 <div className="min-w-0">
-                  <div className="text-sm font-display font-bold text-white truncate">
+                  <div className="text-sm font-display font-bold text-white group-hover:text-[#FFB6D9] transition-colors truncate">
                     Profile, Cloud Save & Settings
                   </div>
                   <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
@@ -1192,7 +1615,7 @@ export default function App() {
                       : `Amber / NIP-46 Sign-In · ${persisted.relays.length} relays`}
                   </p>
                 </div>
-                <ChevronRight className="w-4 h-4 text-[#B8B8B8] shrink-0" />
+                <ChevronRight className="w-4 h-4 text-[#FF1493] shrink-0" />
               </button>
             </div>
           </section>
@@ -1216,8 +1639,19 @@ export default function App() {
             imageStatuses={coordinator.imageStatus}
             viewMode={persisted.settings.codexViewMode}
             syncing={coordinator.syncingEmojis}
+            emojiFilterMode={persisted.settings.emojiFilterMode}
+            bannedAuthorCount={effectiveBannedSet.size}
+            bannedHashCount={effectiveBannedHashesSet.size}
+            safeAuthorCount={effectiveSafeSet.size}
+            safeAuthorsSet={effectiveSafeSet}
+            isEmojiAllowed={isEmojiAllowedCallback}
             onChangeViewMode={handleChangeCodexViewMode}
             onSyncNip30={() => void coordinator.syncNip30Emojis()}
+            onChangeFilterMode={handleChangeFilterMode}
+            onOpenModerationPanel={() => openAccountPanel('moderation')}
+            onReportAndBanAuthor={handleReportAndBanAuthor}
+            onReportAndBanEmojiHash={handleReportAndBanEmojiHash}
+            onAddSafeAuthor={handleAddSafeAuthor}
           />
         )}
 
@@ -1255,6 +1689,10 @@ export default function App() {
             storageError={storageError}
             relays={persisted.relays}
             settings={persisted.settings}
+            nsfwBanPubkeys={persisted.nsfwBanPubkeys}
+            nsfwBanEmojiHashes={persisted.nsfwBanEmojiHashes}
+            safePackAuthors={persisted.safePackAuthors}
+            relayReports={relayModerationReports}
             initialPanel={settingsPanel}
             onToggleProgressSync={handleToggleProgressSync}
             onSyncProgressNow={() => syncProgressSnapshotToRelays()}
@@ -1263,6 +1701,15 @@ export default function App() {
             onRestoreProgressFromRelays={() => restoreProgressFromRelays(false)}
             onUpdateRelays={handleUpdateRelays}
             onUpdateSettings={handleUpdateSettings}
+            onReportAndBanAuthor={handleReportAndBanAuthor}
+            onUnbanAuthor={handleUnbanAuthor}
+            onReportAndBanEmojiHash={handleReportAndBanEmojiHash}
+            onUnbanEmojiHash={handleUnbanEmojiHash}
+            onAddSafeAuthor={handleAddSafeAuthor}
+            onRemoveSafeAuthor={handleRemoveSafeAuthor}
+            onRefreshModerationReports={async () => {
+              await coordinator.syncModerationReports();
+            }}
           />
         )}
       </main>

@@ -1,4 +1,9 @@
 import { formatShortNpub, type NostrProfileMeta } from './nostrEngine';
+import {
+  getArenaPixelTileCanvas,
+  getEmojiContrastBacking,
+  MOJI_APP_ICON_URL,
+} from './pixelBackgrounds';
 import type { RunReceiptRecord } from './storage';
 
 export interface ScoreCardRenderInput {
@@ -123,7 +128,11 @@ export function buildScoreSummaryText(
   const playerName =
     profile?.displayName || profile?.name || formatShortNpub(receipt.pubkey);
   const bestSpell = parseBestWeaponLabel(receipt);
-  const featured = receipt.featuredEmoji ? ` · Nemesis :${receipt.featuredEmoji.shortcode}:` : '';
+  const featuredHash =
+    receipt.featuredEmoji?.hash ||
+    receipt.featuredEmoji?.emojiKey.split(':').pop() ||
+    '';
+  const featured = featuredHash ? ` · Nemesis #${featuredHash.slice(0, 8)}` : '';
   const statusLine =
     receipt.status === 'confirmed' && receipt.signedEvent
       ? `Relay Confirmed (sig:${receipt.signedEvent.sig.slice(0, 10)})`
@@ -162,38 +171,41 @@ export async function renderRunScoreCardPng(
   ctx.scale(scale, scale);
 
   // Load images with untainted CORS safety
-  const [avatarImg, fallbackImg, featuredEmojiImg] = await Promise.all([
+  const [avatarImg, fallbackImg, featuredEmojiImg, brandIconImg] = await Promise.all([
     loadCorsCleanImage(profile?.picture),
     loadCorsCleanImage(defaultAvatarUrl),
     loadCorsCleanImage(receipt.featuredEmoji?.url),
+    loadCorsCleanImage(MOJI_APP_ICON_URL),
   ]);
-  const playerImg = avatarImg || fallbackImg;
+  const playerImg = avatarImg || fallbackImg || brandIconImg;
 
-  // 1. Obsidian Arcade Ticket Base
+  // 1. BreBre Colors Retro Pixel-Art Ticket Base
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
 
-  // Subtle coordinate grid texture
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
-  ctx.lineWidth = 1;
-  for (let gx = 32; gx < width; gx += 32) {
-    ctx.beginPath();
-    ctx.moveTo(gx, 0);
-    ctx.lineTo(gx, height);
-    ctx.stroke();
-  }
-  for (let gy = 32; gy < height; gy += 32) {
-    ctx.beginPath();
-    ctx.moveTo(0, gy);
-    ctx.lineTo(width, gy);
-    ctx.stroke();
+  const pixelTile = getArenaPixelTileCanvas('dungeon_circuit', receipt.wave);
+  if (pixelTile) {
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    for (let tx = 0; tx < width; tx += pixelTile.width) {
+      for (let ty = 0; ty < height; ty += pixelTile.height) {
+        ctx.drawImage(pixelTile, tx, ty);
+      }
+    }
+    ctx.restore();
   }
 
-  // Outer receipt frame
+  // Outer receipt frame (#111111 Gray 900 + #9A0957 / #FF1493 double border)
   const pad = 24;
-  ctx.fillStyle = '#0A0A0E';
+  ctx.fillStyle = '#111111';
+  ctx.strokeStyle = '#9A0957';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.roundRect(pad - 2, pad - 2, width - (pad - 2) * 2, height - (pad - 2) * 2, 22);
+  ctx.stroke();
+
   ctx.strokeStyle = '#FF1493';
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.roundRect(pad, pad, width - pad * 2, height - pad * 2, 20);
   ctx.fill();
@@ -205,13 +217,22 @@ export async function renderRunScoreCardPng(
   ctx.roundRect(pad + 18, pad + 18, width - (pad + 18) * 2, 6, 3);
   ctx.fill();
 
-  // Arcade Header
-  ctx.fillStyle = '#FFFFFF';
-  ctx.font = '800 26px "Outfit", system-ui, sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText('MOJISURVIVOR', pad + 26, pad + 60);
+  // Brand App Icon + Arcade Header
+  if (brandIconImg) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(pad + 24, pad + 34, 34, 34, 8);
+    ctx.clip();
+    ctx.drawImage(brandIconImg, pad + 24, pad + 34, 34, 34);
+    ctx.restore();
+  }
 
-  ctx.fillStyle = '#00F0FF';
+  ctx.fillStyle = '#FFFFFF';
+  ctx.font = '800 24px "Outfit", system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('MOJISURVIVOR', brandIconImg ? pad + 68 : pad + 26, pad + 60);
+
+  ctx.fillStyle = '#FFB6D9';
   ctx.font = '600 13px "JetBrains Mono", monospace';
   ctx.textAlign = 'right';
   const dateStr = new Date(receipt.createdAt * 1000).toISOString().slice(0, 16).replace('T', ' ');
@@ -220,7 +241,7 @@ export async function renderRunScoreCardPng(
   // Dashed receipt perforation
   const drawPerforation = (y: number) => {
     ctx.save();
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.strokeStyle = '#5B0633';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([6, 6]);
     ctx.beginPath();
@@ -232,19 +253,24 @@ export async function renderRunScoreCardPng(
 
   drawPerforation(pad + 80);
 
-  // Player Identity Row
+  // Player Identity Row with Opaque Contrast Cushion
   const avatarX = pad + 56;
   const avatarY = pad + 128;
   const avatarR = 28;
 
   ctx.save();
-  ctx.fillStyle = '#141418';
+  ctx.fillStyle = '#5B0633';
   ctx.strokeStyle = '#FF1493';
   ctx.lineWidth = 2.5;
   ctx.beginPath();
   ctx.arc(avatarX, avatarY, avatarR, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
+
+  ctx.fillStyle = '#C0C0C0';
+  ctx.beginPath();
+  ctx.arc(avatarX, avatarY, avatarR - 3, 0, Math.PI * 2);
+  ctx.fill();
 
   if (playerImg) {
     ctx.save();
@@ -385,31 +411,45 @@ export async function renderRunScoreCardPng(
   ctx.fillText(bestSpell, pad + 42, loadoutY + 54);
 
   if (receipt.featuredEmoji) {
+    const featHash =
+      receipt.featuredEmoji.hash ||
+      receipt.featuredEmoji.emojiKey.split(':').pop() ||
+      '';
     ctx.fillStyle = '#FFB6D9';
     ctx.font = '500 13px "JetBrains Mono", monospace';
     ctx.fillText(
-      `Featured Takedown: :${receipt.featuredEmoji.shortcode}: (${receipt.featuredEmoji.tier} · Pwr ${receipt.featuredEmoji.powerRating})`,
+      `Featured Takedown: #${featHash.slice(0, 8)} (${receipt.featuredEmoji.tier} · Pwr ${receipt.featuredEmoji.powerRating})`,
       pad + 42,
       loadoutY + 84
     );
 
     const badgeX = width - pad - 76;
     const badgeY = loadoutY + 54;
-    ctx.fillStyle = '#08080C';
+    const backing = getEmojiContrastBacking(
+      featuredEmojiImg ?? undefined,
+      receipt.featuredEmoji.url
+    );
+    ctx.fillStyle = backing.outerFill;
     ctx.strokeStyle = '#FF1493';
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 1.8;
     ctx.beginPath();
     ctx.roundRect(badgeX - 30, badgeY - 30, 60, 60, 12);
     ctx.fill();
     ctx.stroke();
 
+    // Opaque high-contrast inner cushion so dark/non-contrasting emojis pop on the exported receipt
+    ctx.fillStyle = backing.innerCushionFill;
+    ctx.beginPath();
+    ctx.roundRect(badgeX - 25, badgeY - 25, 50, 50, 9);
+    ctx.fill();
+
     if (featuredEmojiImg) {
       ctx.drawImage(featuredEmojiImg, badgeX - 22, badgeY - 22, 44, 44);
     } else {
-      ctx.fillStyle = '#00F0FF';
-      ctx.font = '700 13px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#5B0633';
+      ctx.font = '700 12px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
-      ctx.fillText(`:${receipt.featuredEmoji.shortcode.slice(0, 4)}:`, badgeX, badgeY + 4);
+      ctx.fillText(`#${featHash.slice(0, 6)}`, badgeX, badgeY + 4);
     }
   } else {
     ctx.fillStyle = '#B8B8B8';

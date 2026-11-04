@@ -170,15 +170,16 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   return (
     <section className="max-w-5xl mx-auto px-4 py-3.5 space-y-3">
       {/* Header & Honest Cryptographic Verification Notice */}
-      <div className="flex flex-wrap items-start justify-between gap-3 pb-2.5 border-b border-white/10">
+      <div className="flex flex-wrap items-start justify-between gap-3 pb-2.5 border-b border-[#9A0957]/45">
         <div className="min-w-0 space-y-0.5">
+          <div className="w-7 h-1 rounded-full bg-[#FF1493] mb-1" />
           <h1 className="text-lg sm:text-xl font-display font-bold text-white tracking-tight">
             Relay Leaderboard
           </h1>
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#B8B8B8]">
             <span>Personal best per pubkey</span>
             <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums">{entries.length} ranked</span>
+            <span className="font-mono tabular-nums text-[#FFB6D9]">{entries.length} ranked</span>
             <span aria-hidden="true">·</span>
             <span>BIP-340 Schnorr verified authorship (relay-attested, not server anti-cheat)</span>
           </div>
@@ -188,19 +189,19 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
           type="button"
           onClick={onRefreshRelays}
           disabled={syncing}
-          className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#111111] border border-white/15 hover:border-[#FF1493] disabled:opacity-50 text-xs font-semibold text-white transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] disabled:opacity-50 text-xs font-semibold text-white transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`w-3.5 h-3.5 text-[#FFB6D9] ${syncing ? 'animate-spin' : ''}`} />
           <span>{syncing ? 'Querying…' : 'Refresh'}</span>
         </button>
       </div>
 
       {/* Segmented View Switch */}
-      <div className="inline-flex items-center gap-1 p-1 rounded-lg bg-[#111111] border border-white/10">
+      <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#111111] border border-[#9A0957]/55">
         <button
           type="button"
           onClick={() => setTab('global')}
-          className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
             tab === 'global' ? 'bg-[#FF1493] text-white' : 'text-[#B8B8B8] hover:text-white'
           }`}
         >
@@ -209,7 +210,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         <button
           type="button"
           onClick={() => setTab('local')}
-          className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
             tab === 'local' ? 'bg-[#FF1493] text-white' : 'text-[#B8B8B8] hover:text-white'
           }`}
         >
@@ -250,7 +251,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         ) : (
           <>
             {/* Mobile Compact List */}
-            <div className="md:hidden divide-y divide-white/10 rounded-xl bg-[#111111] border border-white/10 overflow-hidden">
+            <div className="md:hidden divide-y divide-[#5B0633]/70 rounded-xl bg-[#111111] border border-[#9A0957]/55 overflow-hidden">
               {entries.slice(0, 50).map((entry, idx) => {
                 const prof = profiles.get(entry.pubkey);
                 const isCurrentUser = entry.pubkey === currentPubkey;
@@ -262,10 +263,10 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                   <div key={entry.eventId} className="p-3">
                     <div className="flex items-center justify-between gap-2.5">
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="text-xs font-mono tabular-nums text-[#B8B8B8] w-5 shrink-0">
+                        <span className="text-xs font-mono tabular-nums text-[#FFB6D9] w-5 shrink-0">
                           #{idx + 1}
                         </span>
-                        <div className="w-8 h-8 rounded-full bg-black border border-white/15 overflow-hidden shrink-0">
+                        <div className="w-8 h-8 rounded-full emoji-opaque-pod p-0.5 overflow-hidden shrink-0">
                           <img
                             src={prof?.picture || defaultAvatarUrl}
                             alt={displayName}
@@ -273,7 +274,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                             onError={(e) => {
                               (e.currentTarget as HTMLImageElement).src = defaultAvatarUrl;
                             }}
-                            className="w-full h-full object-cover"
+                            className="w-full h-full rounded-full object-cover"
                           />
                         </div>
                         <div className="min-w-0">
@@ -352,10 +353,10 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
             </div>
 
             {/* Desktop Full Table */}
-            <div className="hidden md:block overflow-x-auto border border-white/10 rounded-xl bg-[#111111]">
+            <div className="hidden md:block overflow-x-auto border border-[#9A0957]/55 rounded-xl bg-[#111111]">
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className="border-b border-white/10 text-xs text-[#B8B8B8] font-medium">
+                  <tr className="border-b border-[#5B0633]/80 text-xs text-[#FFB6D9] font-medium">
                     <th className="py-2.5 px-3.5">Rank</th>
                     <th className="py-2.5 px-3.5">Player</th>
                     <th className="py-2.5 px-3.5 text-right">Best Score</th>
@@ -364,7 +365,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                     <th className="py-2.5 px-3.5">Schnorr Proof</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-white/10 text-xs font-mono tabular-nums">
+                <tbody className="divide-y divide-[#5B0633]/60 text-xs font-mono tabular-nums">
                   {entries.slice(0, 50).map((entry, idx) => {
                     const prof = profiles.get(entry.pubkey);
                     const isCurrentUser = entry.pubkey === currentPubkey;
@@ -374,11 +375,11 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
 
                     return (
                       <React.Fragment key={entry.eventId}>
-                        <tr className="hover:bg-white/[0.02]">
-                          <td className="py-2.5 px-3.5 text-[#B8B8B8]">#{idx + 1}</td>
+                        <tr className="hover:bg-[#5B0633]/20">
+                          <td className="py-2.5 px-3.5 text-[#FFB6D9]">#{idx + 1}</td>
                           <td className="py-2.5 px-3.5 font-sans">
                             <div className="flex items-center gap-2.5">
-                              <div className="w-7 h-7 rounded-full bg-black border border-white/15 overflow-hidden shrink-0">
+                              <div className="w-8 h-8 rounded-full emoji-opaque-pod p-0.5 overflow-hidden shrink-0">
                                 <img
                                   src={prof?.picture || defaultAvatarUrl}
                                   alt={displayName}
@@ -386,7 +387,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                                   onError={(e) => {
                                     (e.currentTarget as HTMLImageElement).src = defaultAvatarUrl;
                                   }}
-                                  className="w-full h-full object-cover"
+                                  className="w-full h-full rounded-full object-cover"
                                 />
                               </div>
                               <div className="min-w-0">

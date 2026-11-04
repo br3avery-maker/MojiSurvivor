@@ -1,8 +1,19 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
 import { finalizeEvent, generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
-import { buildStableEmojiKey, deriveEmojiStats } from '../src/lib/cryptoStats';
 import {
+  buildStableEmojiKey,
+  deriveEmojiStats,
+  extractEmojiHash,
+  RESERVE_EMOJI_DEFS,
+} from '../src/lib/cryptoStats';
+import {
+  normalizeEmojiHash,
+  normalizePubkeyOrNpub,
+  pubkeyHexToNpub,
+} from '../src/lib/moderationLists';
+import {
+  MODERATION_REPORT_TOPIC,
   MojiNostrCoordinator,
   PROGRESS_SNAPSHOT_D_TAG,
   validateNip46PairingResponse,
@@ -117,7 +128,7 @@ beforeEach(() => {
 });
 
 describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security', () => {
-  it('1. Migrates legacy v2 saves cleanly without losing high score, Mojo, upgrades, or Codex unlocks', () => {
+  it('1. Migrates legacy v2 saves cleanly to SHA-256 hash keys and purges fake 2-letter SVG placeholders without losing kills, Mojo, or Player Level', () => {
     const legacyV2 = {
       mojoBalance: 140,
       highScore: 58955,
@@ -132,10 +143,28 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
           firstDefeatedAt: 1700000000000,
           powerRating: 95,
         },
-        rocket: {
-          shortcode: 'rocket',
+        url_less_placeholder: {
+          shortcode: 'angy',
           kills: 5,
           firstDefeatedAt: 1700000050000,
+          powerRating: 131,
+        },
+        fake_monogram_svg: {
+          shortcode: 'cheermon',
+          url: `data:image/svg+xml;utf8,${encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg"><rect fill="#180614"/><text>CH</text></svg>'
+          )}`,
+          source: 'nip30',
+          kills: 9,
+          firstDefeatedAt: 1700000060000,
+          powerRating: 120,
+        },
+        valid_nip30: {
+          shortcode: 'rocket',
+          url: 'https://cdn.example.com/emotes/rocket.png',
+          source: 'nip30',
+          kills: 11,
+          firstDefeatedAt: 1700000070000,
           powerRating: 131,
         },
       },
@@ -158,6 +187,7 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
     assert.equal(state.schemaVersion, 3);
     assert.equal(state.highScore, 58955);
     assert.equal(state.bestWave, 10);
+    assert.equal(state.totalKills, 552, 'Total historical kills preserved even when fake SVG entries are purged');
     assert.equal(state.mojoBalance, 140);
     assert.equal(state.upgrades.attack, 2);
     assert.equal(state.upgrades.defense, 1);
@@ -166,9 +196,24 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
     const expectedSpent = computeTotalMojoSpentOnUpgrades(state.upgrades);
     assert.equal(state.lifetimeMojoEarned, 140 + expectedSpent);
     assert.ok(state.playerLevel >= 2, 'Persistent career player level derived from historical progress');
-    assert.equal(state.codex['reserve:nostrich_runner']?.kills, 17);
-    const migratedRocket = Object.values(state.codex).find((c) => c.shortcode === 'rocket');
-    assert.equal(migratedRocket?.kills, 5);
+
+    const nostrichReserve = RESERVE_EMOJI_DEFS.find((r) => r.shortcode === 'nostrich_runner')!;
+    const expectedReserveKey = buildStableEmojiKey(nostrichReserve.url, 'reserve');
+    assert.equal(state.codex[expectedReserveKey]?.kills, 17);
+
+    const expectedRocketKey = buildStableEmojiKey(
+      'https://cdn.example.com/emotes/rocket.png',
+      'nip30'
+    );
+    assert.equal(state.codex[expectedRocketKey]?.kills, 11);
+
+    assert.equal(
+      Object.values(state.codex).some(
+        (c) => c.shortcode === 'angy' || c.shortcode === 'cheermon'
+      ),
+      false,
+      'URL-less and fake two-letter monogram SVG entries must be purged completely'
+    );
   });
 
   it('2. Checkpoints mid-run Mojo & Career XP idempotently (zero loss on exit, zero duplication on completion/retry)', () => {
@@ -281,9 +326,16 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
     assert.ok(failedSave.error && failedSave.error.length > 0);
   });
 
-  it('4. Persists offline NIP-30 Codex unlocks with non-colliding publisher keys and restores without live relay discovery', () => {
+  it('4. Keys & deduplicates NIP-30 emojis purely by canonical 64-hex SHA-256 hash and restores offline Codex unlocks', () => {
     const pubA = 'a'.repeat(64);
     const pubB = 'b'.repeat(64);
+    const blossomDigest = '0123456789abcdef'.repeat(4);
+
+    assert.equal(
+      extractEmojiHash(`https://blossom.primal.net/${blossomDigest}.webp`),
+      blossomDigest,
+      'Extracts embedded 64-hex Blossom SHA-256 digest directly from URL path'
+    );
 
     const rocketA = deriveEmojiStats(
       'rocket',
@@ -297,17 +349,26 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
       'nip30',
       { packAuthor: pubB, packDTag: 'retro-pack', packTitle: 'Retro Pack B' }
     );
+    const duplicateMediaDifferentCode = deriveEmojiStats(
+      'totally_different_shortcode',
+      'https://cdn.example.com/a/rocket.png',
+      'nip30',
+      { packAuthor: pubB, packDTag: 'repost-list', packTitle: 'Reposted List' }
+    );
 
     assert.notEqual(
       rocketA.emojiKey,
       rocketB.emojiKey,
-      'Same shortcode from different publishers/URLs must never collide'
+      'Different media hashes never collide even if shortcodes match'
     );
     assert.equal(
-      buildStableEmojiKey('rocket', 'https://cdn.example.com/a/rocket.png', 'nip30', {
-        packAuthor: pubA,
-        packDTag: 'space-pack',
-      }),
+      rocketA.emojiKey,
+      duplicateMediaDifferentCode.emojiKey,
+      'Identical media hash shares exact canonical nip30:<64hex> key and combat stats regardless of shortcode'
+    );
+    assert.equal(rocketA.powerRating, duplicateMediaDifferentCode.powerRating);
+    assert.equal(
+      buildStableEmojiKey('https://cdn.example.com/a/rocket.png', 'nip30'),
       rocketA.emojiKey
     );
 
@@ -327,15 +388,15 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
     });
     assert.ok(
       offlineCoordinator.emojis.has(rocketA.emojiKey),
-      'Unlocked NIP-30 emoji A restored immediately offline'
+      'Unlocked NIP-30 emoji A restored immediately offline by SHA-256 key'
     );
     assert.ok(
       offlineCoordinator.emojis.has(rocketB.emojiKey),
-      'Unlocked NIP-30 emoji B restored immediately offline'
+      'Unlocked NIP-30 emoji B restored immediately offline by SHA-256 key'
     );
     assert.equal(offlineCoordinator.emojis.get(rocketA.emojiKey)?.packTitle, 'Space Pack A');
 
-    // Also verify kind:10030 ["a", "30030:<pubkey>:<d-tag>"] set reference extraction & ingestion
+    // Verify kind:10030 ["a", "30030:<pubkey>:<d-tag>"] set reference extraction & cross-pack deduplication
     const setAuthorSk = generateSecretKey();
     const setAuthorPub = getPublicKey(setAuthorSk);
     const userSk = generateSecretKey();
@@ -343,7 +404,10 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
       {
         kind: 10030,
         created_at: 1790000100,
-        tags: [['a', `30030:${setAuthorPub}:cyber-emotes`, 'wss://relay.damus.io']],
+        tags: [
+          ['a', `30030:${setAuthorPub}:cyber-emotes`, 'wss://relay.damus.io'],
+          ['emoji', 'reposted_laser', 'https://cdn.example.com/cyber/laser_pepe.png'],
+        ],
         content: '',
       },
       userSk
@@ -366,12 +430,19 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
       },
       setAuthorSk
     );
+    offlineCoordinator.ingestNip30PackEvent(list10030);
     offlineCoordinator.ingestNip30PackEvent(pack30030);
-    const ingested = Array.from(offlineCoordinator.emojis.values()).find(
-      (e) => e.shortcode === 'laser_pepe'
+
+    const laserHash = extractEmojiHash('https://cdn.example.com/cyber/laser_pepe.png');
+    const matchingEntries = Array.from(offlineCoordinator.emojis.values()).filter(
+      (e) => e.hash === laserHash
     );
-    assert.ok(ingested);
-    assert.equal(ingested!.packTitle, 'Cyber Emotes');
+    assert.equal(
+      matchingEntries.length,
+      1,
+      'Same custom emoji media across kind:10030 and kind:30030 deduplicates into 1 hash entry'
+    );
+    assert.equal(matchingEntries[0].packTitle, 'Cyber Emotes');
   });
 
   it('5. Signs Nostr mojisurvivor:progress:v1 snapshots, queues offline, and reconciles cross-device saves without duplicating Mojo', async () => {
@@ -721,5 +792,210 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
     assert.deepEqual(click2, { ok: true, remaining: 37, level: 2 });
     assert.deepEqual(click3, { ok: false, remaining: 37, level: 2 });
     assert.equal(normalizeAndMigrateState(state)?.mojoBalance, 37);
+  });
+
+  it('10. Shows first-load warning, keeps live Nostr open without keyword censorship, bans SHA-256 hashes & npubs privately, publishes anonymous relay reports, and supports Safe List curation', async () => {
+    // 10a. First-load warning defaults to `null` until accepted, then persists
+    const fresh = createDefaultState();
+    assert.equal(fresh.contentWarningAcceptedAt, null);
+    assert.equal(fresh.settings.emojiFilterMode, 'open_with_banlist');
+
+    savePersistedState({ ...fresh, contentWarningAcceptedAt: 1793000000000 });
+    const reloaded = loadPersistedStateWithDiagnostics().state;
+    assert.equal(reloaded.contentWarningAcceptedAt, 1793000000000);
+
+    // 10b. Live NIP-30 packs are NEVER choked by keyword heuristics in default `open_with_banlist` mode
+    const userSk = generateSecretKey();
+    const userPub = getPublicKey(userSk);
+    const nsfwAuthorSk = generateSecretKey();
+    const nsfwAuthorPub = getPublicKey(nsfwAuthorSk);
+    const nsfwAuthorNpub = pubkeyHexToNpub(nsfwAuthorPub);
+    const safeAuthorSk = generateSecretKey();
+    const safeAuthorPub = getPublicKey(safeAuthorSk);
+    const reposterSk = generateSecretKey();
+
+    assert.equal(normalizePubkeyOrNpub(nsfwAuthorNpub), nsfwAuthorPub);
+
+    const coord = new MojiNostrCoordinator(['wss://relay.damus.io'], undefined, {
+      disableNetwork: true,
+    });
+    assert.equal(coord.importNsecKey(nip19.nsecEncode(userSk)).ok, true);
+
+    const wildHash = extractEmojiHash('https://cdn.example.com/wild_emote.png');
+    const badHash1 = extractEmojiHash('https://cdn.example.com/bad1.png');
+    const badHashReposted = extractEmojiHash('https://cdn.example.com/reposted_nsfw.png');
+    assert.equal(normalizeEmojiHash(`#${badHashReposted}`), badHashReposted);
+
+    const wildNostrPack = finalizeEvent(
+      {
+        kind: 30030,
+        created_at: 1792000100,
+        tags: [
+          ['d', 'edgy-nostr-pack'],
+          ['content-warning', 'edgy'],
+          ['emoji', 'wild_emote', 'https://cdn.example.com/wild_emote.png'],
+        ],
+        content: '',
+      },
+      safeAuthorSk
+    );
+    const reportedNsfwPack = finalizeEvent(
+      {
+        kind: 30030,
+        created_at: 1792000200,
+        tags: [
+          ['d', 'spam-pack'],
+          ['title', 'Spam Pack'],
+          ['emoji', 'bad_emote_1', 'https://cdn.example.com/bad1.png'],
+          ['emoji', 'bad_emote_2', 'https://cdn.example.com/bad2.png'],
+        ],
+        content: '',
+      },
+      nsfwAuthorSk
+    );
+    const repostedPackFromStranger = finalizeEvent(
+      {
+        kind: 10030,
+        created_at: 1792000300,
+        tags: [
+          ['emoji', 'innocent_shortcode', 'https://cdn.example.com/reposted_nsfw.png'],
+        ],
+        content: '',
+      },
+      reposterSk
+    );
+
+    coord.ingestNip30PackEvent(wildNostrPack);
+    coord.ingestNip30PackEvent(reportedNsfwPack);
+    coord.ingestNip30PackEvent(repostedPackFromStranger);
+
+    assert.equal(
+      Array.from(coord.emojis.values()).some((e) => e.hash === wildHash),
+      true,
+      'Open Nostr mode must NOT kill packs based on tags or keywords'
+    );
+    assert.equal(
+      Array.from(coord.emojis.values()).some((e) => e.hash === badHash1),
+      true
+    );
+
+    // 10c. Report & Ban both npub AND standalone SHA-256 emoji hash:
+    coord.updateModerationPolicy({
+      emojiFilterMode: 'open_with_banlist',
+      nsfwBanPubkeys: [nsfwAuthorNpub],
+      nsfwBanEmojiHashes: [badHashReposted],
+      safePackAuthors: [],
+      blockedEmojiKeys: [],
+    });
+    assert.equal(
+      Array.from(coord.emojis.values()).some((e) => e.packAuthor === nsfwAuthorPub),
+      false,
+      'All emojis from banned npub are immediately filtered out'
+    );
+    assert.equal(
+      Array.from(coord.emojis.values()).some((e) => e.hash === badHashReposted),
+      false,
+      'Banned SHA-256 media hash is immediately filtered out regardless of shortcode or reposter'
+    );
+    assert.equal(
+      Array.from(coord.emojis.values()).some((e) => e.hash === wildHash),
+      true,
+      'Non-banned Nostr packs remain untouched'
+    );
+
+    const reportAuthorRes = await coord.publishAnonymousModerationReport({
+      targetPubkeyOrNpub: nsfwAuthorNpub,
+      verdict: 'nsfw_ban',
+      packTitle: 'Spam Pack',
+      packDTag: 'spam-pack',
+      emojiHash: badHash1,
+    });
+    assert.equal(reportAuthorRes.ok, true);
+    assert.ok(reportAuthorRes.event);
+    assert.notEqual(
+      reportAuthorRes.event!.pubkey,
+      userPub,
+      'Moderation report MUST be signed by an anonymous ephemeral keypair, never exposing the player npub'
+    );
+    assert.equal(
+      reportAuthorRes.event!.tags.find((t) => t[0] === 't')?.[1],
+      MODERATION_REPORT_TOPIC
+    );
+    assert.equal(
+      reportAuthorRes.event!.tags.find((t) => t[0] === 'x')?.[1],
+      badHash1,
+      'Includes NIP-94 SHA-256 x-hash tag instead of shortcode'
+    );
+
+    const reportHashOnlyRes = await coord.publishAnonymousModerationReport({
+      verdict: 'nsfw_hash',
+      emojiHash: badHashReposted,
+    });
+    assert.equal(reportHashOnlyRes.ok, true);
+    assert.equal(
+      reportHashOnlyRes.event!.tags.find((t) => t[0] === 'x')?.[1],
+      badHashReposted
+    );
+
+    // Verify published reports are inspectable in Relay Moderation Reports feed
+    const allReports = coord.getSortedModerationReports('all');
+    assert.equal(allReports.length, 2);
+    assert.ok(allReports.some((r) => r.verdict === 'nsfw_ban' && r.targetNpub === nsfwAuthorNpub));
+    assert.ok(allReports.some((r) => r.verdict === 'nsfw_hash' && r.emojiHash === badHashReposted));
+
+    // Verify public progression snapshot (`mojisurvivor:progress:v1`) NEVER exposes private `nsfwBanPubkeys` or `nsfwBanEmojiHashes`
+    const stateWithPrivateBan: PersistedGameState = {
+      ...fresh,
+      mojoBalance: 300,
+      lifetimeMojoEarned: 300,
+      nsfwBanPubkeys: [nsfwAuthorPub],
+      nsfwBanEmojiHashes: [badHashReposted],
+      safePackAuthors: [safeAuthorPub],
+    };
+    const progressTemplate = coord.buildUnsignedProgressTemplate(stateWithPrivateBan);
+    assert.ok(
+      !progressTemplate.content.includes(nsfwAuthorPub) &&
+        !progressTemplate.content.includes(badHashReposted),
+      'Private NSFW ban lists (npubs and SHA-256 hashes) must never leak inside public Nostr progression snapshots'
+    );
+
+    // 10d. Safe List Only mode restricts NIP-30 packs strictly to safe-listed npubs (+ user's own packs)
+    const strangerSk = generateSecretKey();
+    const strangerHash = extractEmojiHash('https://cdn.example.com/stranger.png');
+    const strangerPack = finalizeEvent(
+      {
+        kind: 30030,
+        created_at: 1792000500,
+        tags: [
+          ['d', 'stranger-pack'],
+          ['emoji', 'stranger_emote', 'https://cdn.example.com/stranger.png'],
+        ],
+        content: '',
+      },
+      strangerSk
+    );
+    coord.ingestNip30PackEvent(strangerPack);
+    assert.equal(
+      Array.from(coord.emojis.values()).some((e) => e.hash === strangerHash),
+      true
+    );
+
+    coord.updateModerationPolicy({
+      emojiFilterMode: 'safe_list_only',
+      nsfwBanPubkeys: [nsfwAuthorPub],
+      nsfwBanEmojiHashes: [badHashReposted],
+      safePackAuthors: [safeAuthorPub],
+      blockedEmojiKeys: [],
+    });
+    assert.equal(
+      Array.from(coord.emojis.values()).some((e) => e.hash === wildHash),
+      true,
+      'Safe-listed creator pack remains active in Safe List Only mode'
+    );
+    assert.equal(
+      Array.from(coord.emojis.values()).some((e) => e.hash === strangerHash),
+      false,
+      'Non-safe-listed stranger pack is excluded in Safe List Only mode'
+    );
   });
 });

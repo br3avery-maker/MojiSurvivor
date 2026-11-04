@@ -39,38 +39,50 @@ export function sha256Hex(input: string): string {
 }
 
 /**
- * Computes a collision-resistant, deterministic identity key for an emoji based on
- * its source, publisher pubkey, pack identifier, shortcode, and canonical media URL hash.
- * Prevents different publishers' `:fire:` or `:pepe:` emojis from overwriting one another.
+ * Extracts the canonical 64-character lowercase hex SHA-256 identifier for an emoji media URL.
+ * - If the URL path already embeds a Blossom / NIP-94 64-hex SHA-256 digest (e.g. `/<64-hex>.png`),
+ *   uses that exact content hash so identical blobs across different Blossom mirrors unify cleanly.
+ * - Otherwise computes `sha256Hex(canonicalUrl)` so every emoji has a deterministic 64-hex hash
+ *   with zero reliance on mutable `:shortcode:` names.
  */
-export function buildStableEmojiKey(
-  shortcode: string,
-  url: string,
-  source: 'nip30' | 'reserve',
-  meta?: { packAuthor?: string; packDTag?: string }
-): string {
-  const cleanCode = shortcode.trim().toLowerCase();
-  if (source === 'reserve') {
-    return `reserve:${cleanCode}`;
+export function extractEmojiHash(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed.startsWith('data:')) {
+    try {
+      const parsed = new URL(trimmed);
+      const match = /\/([0-9a-f]{64})(?:\.[a-z0-9]{1,8})?$/i.exec(parsed.pathname);
+      if (match && match[1]) {
+        return match[1].toLowerCase();
+      }
+      parsed.hash = '';
+      return sha256Hex(parsed.href);
+    } catch {
+      // Fall through to raw string SHA-256
+    }
   }
-  const authorPart =
-    meta?.packAuthor && /^[0-9a-f]{64}$/i.test(meta.packAuthor)
-      ? meta.packAuthor.toLowerCase().slice(0, 16)
-      : 'global';
-  const dPart = (meta?.packDTag ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, '')
-    .slice(0, 24);
-  const urlDigest = sha256Hex(url.trim()).slice(0, 10);
-  return dPart
-    ? `nip30:${authorPart}:${dPart}:${cleanCode}:${urlDigest}`
-    : `nip30:${authorPart}:${cleanCode}:${urlDigest}`;
+  return sha256Hex(trimmed);
 }
 
 /**
- * Deterministically computes enemy combat traits from `shortcode:imageUrl`
- * using real SHA-256 (`@noble/hashes/sha2.js`), matching NIP.md specification.
+ * Computes a collision-resistant, hash-addressed identity key (`nip30:<64hex>` or `reserve:<64hex>`).
+ * Never uses `:shortcode:` names — identical media hashes deduplicate cleanly across packs while
+ * different images that happen to share a label remain distinct.
+ */
+export function buildStableEmojiKey(
+  url: string,
+  source: 'nip30' | 'reserve',
+  explicitHash?: string
+): string {
+  const hash =
+    explicitHash && /^[0-9a-f]{64}$/i.test(explicitHash)
+      ? explicitHash.toLowerCase()
+      : extractEmojiHash(url);
+  return source === 'reserve' ? `reserve:${hash}` : `nip30:${hash}`;
+}
+
+/**
+ * Deterministically computes enemy combat traits purely from the emoji's canonical 64-hex SHA-256 hash.
+ * Zero dependency on shortcodes.
  */
 export function deriveEmojiStats(
   shortcode: string,
@@ -81,10 +93,15 @@ export function deriveEmojiStats(
     packAuthor?: string;
     packDTag?: string;
     eventId?: string;
+    hashOverride?: string;
     emojiKeyOverride?: string;
   }
 ): EmojiCombatTrait {
-  const hash = sha256Hex(`${shortcode}:${url}`);
+  const hash =
+    meta?.hashOverride && /^[0-9a-f]{64}$/i.test(meta.hashOverride)
+      ? meta.hashOverride.toLowerCase()
+      : extractEmojiHash(url);
+
   const byte0 = parseInt(hash.slice(0, 2), 16);
   const byte1 = parseInt(hash.slice(2, 4), 16);
   const byte2 = parseInt(hash.slice(4, 6), 16);
@@ -105,16 +122,17 @@ export function deriveEmojiStats(
   else if (powerRating >= 94) tier = 'Epic';
   else if (powerRating >= 76) tier = 'Rare';
 
+  const canonicalKey = buildStableEmojiKey(url, source, hash);
   const emojiKey =
-    meta?.emojiKeyOverride ||
-    buildStableEmojiKey(shortcode, url, source, {
-      packAuthor: meta?.packAuthor,
-      packDTag: meta?.packDTag,
-    });
+    meta?.emojiKeyOverride && /^(nip30|reserve):[0-9a-f]{64}$/i.test(meta.emojiKeyOverride)
+      ? meta.emojiKeyOverride.toLowerCase()
+      : canonicalKey;
+
+  const fallbackId = hash.slice(0, 8);
 
   return {
     emojiKey,
-    shortcode,
+    shortcode: shortcode?.trim() || fallbackId,
     url,
     hash,
     hp,
@@ -140,10 +158,14 @@ function makeReserveSvgDataUri(bg: string, stroke: string, glyphPath: string): s
 }
 
 /**
- * Offline-resilient Nostr community reserve pool (used immediately on cold boot or offline,
+ * Offline-resilient Nostr vector sprite reserve pool (used immediately on cold boot or offline,
  * seamlessly augmented as live NIP-30 kind 30030 & 10030 events stream from relays).
  */
-export const RESERVE_EMOJI_DEFS: ReadonlyArray<{ shortcode: string; url: string; packTitle: string }> = [
+export const RESERVE_EMOJI_DEFS: ReadonlyArray<{
+  shortcode: string;
+  url: string;
+  packTitle: string;
+}> = [
   {
     shortcode: 'nostrich_runner',
     packTitle: 'Nostr Core Reserve',
@@ -253,3 +275,13 @@ export const RESERVE_EMOJI_DEFS: ReadonlyArray<{ shortcode: string; url: string;
     ),
   },
 ];
+
+const VALID_RESERVE_URLS = new Set(RESERVE_EMOJI_DEFS.map((d) => d.url));
+
+/**
+ * Returns `true` only if `url` is one of the 12 genuine built-in vector reserve sprites.
+ * Rejects any legacy 2-letter monogram SVG (`AN`, `CH`, `BE`, etc.) that older migrations created.
+ */
+export function isGenuineReserveSvgUrl(url: string | undefined | null): boolean {
+  return typeof url === 'string' && VALID_RESERVE_URLS.has(url);
+}

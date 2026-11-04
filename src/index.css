@@ -6,6 +6,20 @@
     --font-display: 'Outfit', system-ui, sans-serif;
     --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+    /* BreBre Colors UI Standards Palette v0 */
+    --brebre-black: #000000;
+    --brebre-deep-pink: #ff1493;
+    --brebre-light-pink: #ffb6d9;
+    --brebre-white: #ffffff;
+    --brebre-gray-100: #b8b8b8;
+    --brebre-gray-900: #111111;
+    --brebre-gray-850: #1a1a1a;
+    --brebre-silver: #c0c0c0;
+    --brebre-gray-600: #5e5e5e;
+    --brebre-pink-dark-1: #cd0d72;
+    --brebre-pink-dark-2: #9a0957;
+    --brebre-pink-dark-3: #5b0633;
   }
 
   html,
@@ -35,6 +49,29 @@
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+.pixelated {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/**
+ * Subtle dark framing pod for transparent NIP-30 custom emoji assets (including animated GIFs).
+ */
+.emoji-opaque-pod {
+  background-color: rgba(26, 26, 26, 0.72);
+  border: 1px solid rgba(154, 9, 87, 0.55);
+}
+
+.emoji-opaque-pod-dark {
+  background-color: #141414;
+  border: 1px solid #5b0633;
+}
+
+.brebre-card {
+  background-color: #111111;
+  border: 1px solid rgba(154, 9, 87, 0.45);
 }
 
 .crt-scanlines {

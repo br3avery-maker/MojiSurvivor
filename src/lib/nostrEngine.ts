@@ -21,9 +21,22 @@ import { createNostrConnectURI, parseBunkerInput } from 'nostr-tools/nip46';
 import { bytesToHex, hexToBytes } from 'nostr-tools/utils';
 import {
   deriveEmojiStats,
+  isGenuineReserveSvgUrl,
   RESERVE_EMOJI_DEFS,
   type EmojiCombatTrait,
 } from './cryptoStats';
+import {
+  getBuiltInBannedHashesSet,
+  getBuiltInBannedHexSet,
+  getBuiltInSafeHexSet,
+  isEmojiAllowedByModeration,
+  normalizeEmojiHash,
+  normalizeEmojiHashList,
+  normalizePubkeyList,
+  normalizePubkeyOrNpub,
+  pubkeyHexToNpub,
+  type EmojiFilterMode,
+} from './moderationLists';
 import {
   sanitizeDisplayText,
   sanitizeRelayUrl,
@@ -113,7 +126,25 @@ const NIP46_PENDING_STORAGE_KEY = 'mojisurvivor_v3_nip46_pending';
 const PROFILE_DISCOVERY_RELAYS = ['wss://purplepag.es'];
 
 export const PROGRESS_SNAPSHOT_D_TAG = 'mojisurvivor:progress:v1';
+export const MODERATION_REPORT_TOPIC = 'mojisurvivor-mod';
 const RUN_D_TAG_PATTERN = /^mojisurvivor:run:\d+:[0-9a-f]{6,64}$/i;
+const MOD_REPORT_D_TAG_PATTERN =
+  /^mojisurvivor:mod:(nsfw_ban|nsfw_hash|safe_nomination):([0-9a-f]{64})$/i;
+
+export interface RelayModerationReport {
+  key: string;
+  targetPubkey?: string;
+  targetNpub?: string;
+  emojiHash?: string;
+  verdict: 'nsfw_ban' | 'nsfw_hash' | 'safe_nomination';
+  packTitle?: string;
+  packDTag?: string;
+  reason?: string;
+  reportCount: number;
+  latestCreatedAt: number;
+  latestEventId: string;
+  reporterPubkeys: string[];
+}
 
 export function generateSecureHexToken(byteLength = 16): string {
   const bytes = new Uint8Array(byteLength);
@@ -260,7 +291,7 @@ export class MojiNostrCoordinator {
   public pubkey = '';
   private localSecretHex = '';
 
-  // Keyed by collision-resistant `emojiKey` (`reserve:...` or `nip30:<author>:<pack>:<code >:<hash>`)
+  // Keyed by collision-resistant canonical SHA-256 hash (`nip30:<64hex>` or `reserve:<64hex>`)
   public emojis = new Map<string, EmojiCombatTrait>();
   public imageCache = new Map<string, HTMLImageElement>();
   public imageStatus = new Map<string, ImageLoadStatus>();
@@ -273,16 +304,50 @@ export class MojiNostrCoordinator {
   public syncingLeaderboard = false;
   public relayReachability = new Map<string, 'idle' | 'ok' | 'error'>();
   public lastSyncError: string | null = null;
+  public filteredEmojiCount = 0;
+  public moderationReports = new Map<string, RelayModerationReport>();
+  public syncingModerationReports = false;
 
   private listeners = new Set<() => void>();
   private disableNetwork = false;
+  private emojiFilterMode: EmojiFilterMode = 'open_with_banlist';
+  private nsfwBanPubkeys = new Set<string>();
+  private nsfwBanEmojiHashes = new Set<string>();
+  private safePackAuthors = new Set<string>();
+  private blockedEmojiKeys = new Set<string>();
+  private nip51MutedAuthors = new Set<string>();
 
   constructor(
     initialRelays: string[],
     initialCodex?: Record<string, CodexKillRecord>,
-    options?: { disableNetwork?: boolean }
+    options?: {
+      disableNetwork?: boolean;
+      emojiFilterMode?: EmojiFilterMode;
+      nsfwBanPubkeys?: string[];
+      nsfwBanEmojiHashes?: string[];
+      safePackAuthors?: string[];
+      blockedEmojiKeys?: string[];
+    }
   ) {
     this.disableNetwork = Boolean(options?.disableNetwork);
+    if (options?.emojiFilterMode) {
+      this.emojiFilterMode = options.emojiFilterMode;
+    }
+    if (Array.isArray(options?.nsfwBanPubkeys)) {
+      this.nsfwBanPubkeys = new Set(normalizePubkeyList(options.nsfwBanPubkeys));
+    }
+    if (Array.isArray(options?.nsfwBanEmojiHashes)) {
+      this.nsfwBanEmojiHashes = new Set(
+        normalizeEmojiHashList(options.nsfwBanEmojiHashes)
+      );
+    }
+    if (Array.isArray(options?.safePackAuthors)) {
+      this.safePackAuthors = new Set(normalizePubkeyList(options.safePackAuthors));
+    }
+    if (Array.isArray(options?.blockedEmojiKeys)) {
+      this.blockedEmojiKeys = new Set(options.blockedEmojiKeys);
+    }
+
     this.relays = initialRelays
       .map((r) => sanitizeRelayUrl(r))
       .filter((r): r is string => Boolean(r));
@@ -292,22 +357,113 @@ export class MojiNostrCoordinator {
 
     this.loadDeletedTombstones();
     this.pool = this.buildPool();
+    this.restoreOrInitIdentity();
     this.seedReserveEmojis();
     if (initialCodex) {
       this.hydrateEmojisFromCodex(initialCodex);
     }
-    this.restoreOrInitIdentity();
+  }
+
+  public getEffectiveBannedPubkeys(): Set<string> {
+    return new Set([
+      ...getBuiltInBannedHexSet(),
+      ...this.nsfwBanPubkeys,
+      ...this.nip51MutedAuthors,
+    ]);
+  }
+
+  public getEffectiveBannedEmojiHashes(): Set<string> {
+    return new Set([...getBuiltInBannedHashesSet(), ...this.nsfwBanEmojiHashes]);
+  }
+
+  public getEffectiveSafePubkeys(): Set<string> {
+    return new Set([...getBuiltInSafeHexSet(), ...this.safePackAuthors]);
+  }
+
+  public isEmojiAllowed(trait: EmojiCombatTrait): boolean {
+    return isEmojiAllowedByModeration(trait, {
+      filterMode: this.emojiFilterMode,
+      bannedPubkeys: this.getEffectiveBannedSetRef(),
+      bannedEmojiHashes: this.getEffectiveBannedEmojiHashes(),
+      safePubkeys: this.getEffectiveSafePubkeys(),
+      blockedEmojiKeys: this.blockedEmojiKeys,
+      activeUserPubkey: this.pubkey,
+      isSignedIn: this.isSignedIn(),
+    });
+  }
+
+  private getEffectiveBannedSetRef(): Set<string> {
+    return this.getEffectiveBannedPubkeys();
+  }
+
+  /**
+   * Updates the active `npub` Ban List, SHA-256 Hash Ban List, Safe List, and filter mode in real time,
+   * immediately removing banned emojis from memory and re-syncing if widened.
+   */
+  public updateModerationPolicy(opts: {
+    emojiFilterMode: EmojiFilterMode;
+    nsfwBanPubkeys: string[];
+    nsfwBanEmojiHashes?: string[];
+    safePackAuthors: string[];
+    blockedEmojiKeys: string[];
+  }): void {
+    const prevMode = this.emojiFilterMode;
+    const prevBanSize = this.nsfwBanPubkeys.size;
+    const prevHashBanSize = this.nsfwBanEmojiHashes.size;
+    const prevSafeSize = this.safePackAuthors.size;
+
+    this.emojiFilterMode = opts.emojiFilterMode;
+    this.nsfwBanPubkeys = new Set(normalizePubkeyList(opts.nsfwBanPubkeys));
+    this.nsfwBanEmojiHashes = new Set(
+      normalizeEmojiHashList(opts.nsfwBanEmojiHashes ?? [])
+    );
+    this.safePackAuthors = new Set(normalizePubkeyList(opts.safePackAuthors));
+    this.blockedEmojiKeys = new Set(opts.blockedEmojiKeys);
+
+    this.pruneDisallowedEmojis();
+    this.seedReserveEmojis();
+
+    if (
+      prevMode !== opts.emojiFilterMode ||
+      this.nsfwBanPubkeys.size < prevBanSize ||
+      this.nsfwBanEmojiHashes.size < prevHashBanSize ||
+      (opts.emojiFilterMode === 'safe_list_only' && this.safePackAuthors.size > prevSafeSize)
+    ) {
+      void this.syncNip30Emojis();
+    }
+  }
+
+  private pruneDisallowedEmojis(): void {
+    let removed = false;
+    for (const [key, trait] of this.emojis.entries()) {
+      if (!this.isEmojiAllowed(trait)) {
+        this.emojis.delete(key);
+        if (trait.source === 'nip30') {
+          this.imageCache.delete(trait.url);
+          this.imageStatus.delete(trait.url);
+        }
+        this.filteredEmojiCount += 1;
+        removed = true;
+      }
+    }
+    if (removed) {
+      this.emit();
+    }
   }
 
   /**
    * Immediately restores all previously unlocked Codex emojis into `this.emojis`
-   * so offline restarts in Web2App retain 100% of unlocked entries before any relay connects.
+   * (honoring active NSFW npub/hash ban rules and rejecting fake SVG placeholders)
+   * so offline restarts retain unlocked entries.
    */
   public hydrateEmojisFromCodex(codex: Record<string, CodexKillRecord>): void {
     let added = false;
     for (const rec of Object.values(codex)) {
-      if (!rec || !rec.shortcode || !rec.url) continue;
+      if (!rec || !rec.url) continue;
+      if (rec.source === 'reserve' && !isGenuineReserveSvgUrl(rec.url)) continue;
+      if (rec.source === 'nip30' && !sanitizeUrl(rec.url)) continue;
       const trait = codexRecordToTrait(rec);
+      if (!this.isEmojiAllowed(trait)) continue;
       if (!this.emojis.has(trait.emojiKey)) {
         this.emojis.set(trait.emojiKey, trait);
         this.preloadImage(trait.url);
@@ -440,13 +596,14 @@ export class MojiNostrCoordinator {
     const existing = this.imageCache.get(url);
     if (existing) return existing;
 
-    if (!url.startsWith('data:image/svg+xml;') && !sanitizeUrl(url)) {
+    const validReserve = isGenuineReserveSvgUrl(url);
+    if (!validReserve && !sanitizeUrl(url)) {
       this.imageStatus.set(url, 'broken');
       return undefined;
     }
 
     if (typeof Image === 'undefined') {
-      if (url.startsWith('data:image/svg+xml;')) {
+      if (validReserve) {
         this.imageStatus.set(url, 'ready');
       }
       return undefined;
@@ -456,18 +613,27 @@ export class MojiNostrCoordinator {
     img.referrerPolicy = 'no-referrer';
     this.imageStatus.set(url, 'loading');
 
-    img.onload = () => {
-      if (img.naturalWidth > 0) {
-        this.imageStatus.set(url, 'ready');
-      } else {
-        this.imageStatus.set(url, 'broken');
+    const pruneDeadUrl = () => {
+      this.imageStatus.set(url, 'broken');
+      for (const [key, trait] of this.emojis.entries()) {
+        if (trait.source === 'nip30' && trait.url === url) {
+          this.emojis.delete(key);
+        }
       }
       this.emit();
     };
 
+    img.onload = () => {
+      if (img.naturalWidth > 0) {
+        this.imageStatus.set(url, 'ready');
+        this.emit();
+      } else {
+        pruneDeadUrl();
+      }
+    };
+
     img.onerror = () => {
-      this.imageStatus.set(url, 'broken');
-      this.emit();
+      pruneDeadUrl();
     };
 
     img.src = url;
@@ -1213,8 +1379,30 @@ export class MojiNostrCoordinator {
     ]);
   }
 
+  /**
+   * Parses a user's NIP-51 `kind: 10000` Mute List (`p` muted pubkeys)
+   * so authors muted on Nostr are automatically excluded from emoji discovery.
+   */
+  public ingestNip51MuteList(ev: NostrEvent): void {
+    if (!ev || ev.kind !== 10000 || !verifyEvent(ev)) return;
+    for (const tag of ev.tags) {
+      if (tag[0] === 'p' && typeof tag[1] === 'string' && /^[0-9a-f]{64}$/i.test(tag[1])) {
+        this.nip51MutedAuthors.add(tag[1].toLowerCase());
+      }
+    }
+    this.pruneDisallowedEmojis();
+  }
+
   public ingestNip30PackEvent(ev: NostrEvent): void {
     if (!verifyEvent(ev)) return;
+
+    const authorLower = ev.pubkey.toLowerCase();
+    const bannedAuthors = this.getEffectiveBannedPubkeys();
+    if (bannedAuthors.has(authorLower)) {
+      this.filteredEmojiCount += 1;
+      return;
+    }
+
     const rawD = ev.tags.find((t) => t[0] === 'd')?.[1];
     const titleTag = ev.tags.find((t) => t[0] === 'title')?.[1];
     const packTitle = sanitizeDisplayText(
@@ -1225,20 +1413,30 @@ export class MojiNostrCoordinator {
 
     for (const tag of ev.tags) {
       if (tag[0] !== 'emoji') continue;
-      const shortcode = sanitizeShortcode(tag[1]);
       const cleanUrl = sanitizeUrl(tag[2]);
-      if (!shortcode || !cleanUrl) continue;
+      if (!cleanUrl) continue;
+      if (this.imageStatus.get(cleanUrl) === 'broken') continue;
 
+      const shortcode = sanitizeShortcode(tag[1]) || '';
       const traits = deriveEmojiStats(shortcode, cleanUrl, 'nip30', {
         packTitle,
-        packAuthor: ev.pubkey.toLowerCase(),
+        packAuthor: authorLower,
         packDTag,
         eventId: ev.id,
       });
 
-      if (!this.emojis.has(traits.emojiKey)) {
+      if (!this.isEmojiAllowed(traits)) {
+        this.filteredEmojiCount += 1;
+        continue;
+      }
+
+      const existing = this.emojis.get(traits.emojiKey);
+      if (!existing) {
         this.emojis.set(traits.emojiKey, traits);
         this.preloadImage(cleanUrl);
+      } else if (ev.kind === 30030 && existing.packTitle === 'User Emoji List') {
+        // Enrich canonical pack metadata when a 30030 set follows a 10030 user list for the same hash
+        this.emojis.set(traits.emojiKey, traits);
       }
     }
   }
@@ -1281,13 +1479,33 @@ export class MojiNostrCoordinator {
 
   public async syncNip30Emojis(): Promise<void> {
     if (this.disableNetwork || this.syncingEmojis) return;
+
     this.syncingEmojis = true;
     this.emit();
 
     try {
-      const filters: NostrFilter[] = [{ kinds: [30030, 10030], limit: 55 }];
-      if (this.pubkey && /^[0-9a-f]{64}$/i.test(this.pubkey)) {
-        filters.push({ kinds: [10030, 30030], authors: [this.pubkey], limit: 25 });
+      const filters: NostrFilter[] = [];
+      const hasValidUser = Boolean(this.pubkey && /^[0-9a-f]{64}$/i.test(this.pubkey));
+
+      if (this.emojiFilterMode === 'safe_list_only') {
+        const safeAuthors = Array.from(this.getEffectiveSafePubkeys());
+        if (this.isSignedIn() && hasValidUser) {
+          safeAuthors.push(this.pubkey.toLowerCase());
+        }
+        const uniqueSafeAuthors = Array.from(new Set(safeAuthors)).slice(0, 60);
+        if (uniqueSafeAuthors.length > 0) {
+          filters.push({ kinds: [30030, 10030], authors: uniqueSafeAuthors, limit: 60 });
+        }
+      } else {
+        filters.push({ kinds: [30030, 10030], limit: 60 });
+        if (hasValidUser) {
+          filters.push({ kinds: [10030, 30030, 10000], authors: [this.pubkey], limit: 30 });
+        }
+      }
+
+      if (filters.length === 0) {
+        this.pruneDisallowedEmojis();
+        return;
       }
 
       const events = await this.pool.query(filters, {
@@ -1295,31 +1513,49 @@ export class MojiNostrCoordinator {
       });
 
       for (const ev of events) {
+        if (ev.kind === 10000) {
+          this.ingestNip51MuteList(ev);
+        }
+      }
+
+      const bannedSet = this.getEffectiveBannedPubkeys();
+      const packEvents = events.filter((ev) => ev.kind === 30030 || ev.kind === 10030);
+      for (const ev of packEvents) {
         if (!verifyEvent(ev)) continue;
         this.ingestNip30PackEvent(ev);
       }
 
-      const missingRefs = MojiNostrCoordinator.extractNip30SetReferences(events);
+      const missingRefs = MojiNostrCoordinator.extractNip30SetReferences(packEvents);
       if (missingRefs.length > 0) {
         const ptrs = missingRefs.slice(0, 35);
-        const authors = Array.from(new Set(ptrs.map((p) => p.author)));
+        const safeSet = this.getEffectiveSafePubkeys();
+        const authors = Array.from(new Set(ptrs.map((p) => p.author))).filter((a) => {
+          if (bannedSet.has(a)) return false;
+          if (this.emojiFilterMode === 'safe_list_only') {
+            return safeSet.has(a) || (this.isSignedIn() && a === this.pubkey.toLowerCase());
+          }
+          return true;
+        });
         const dTags = Array.from(new Set(ptrs.map((p) => p.dTag)));
 
-        try {
-          const referencedEvents = await this.pool.query(
-            [{ kinds: [30030], authors, '#d': dTags, limit: 50 }],
-            { signal: AbortSignal.timeout(7000) }
-          );
-          for (const refEv of referencedEvents) {
-            if (refEv.kind === 30030) {
-              this.ingestNip30PackEvent(refEv);
+        if (authors.length > 0 && dTags.length > 0) {
+          try {
+            const referencedEvents = await this.pool.query(
+              [{ kinds: [30030], authors, '#d': dTags, limit: 50 }],
+              { signal: AbortSignal.timeout(7000) }
+            );
+            for (const refEv of referencedEvents) {
+              if (refEv.kind === 30030) {
+                this.ingestNip30PackEvent(refEv);
+              }
             }
+          } catch {
+            // Non-fatal follow-up pack query timeout
           }
-        } catch {
-          // Non-fatal follow-up pack query timeout
         }
       }
 
+      this.pruneDisallowedEmojis();
       this.lastSyncError = null;
     } catch (err) {
       this.lastSyncError =
@@ -1328,6 +1564,324 @@ export class MojiNostrCoordinator {
       this.syncingEmojis = false;
       this.emit();
     }
+  }
+
+  /**
+   * Signs an anonymous Nostr moderation report (`kind: 30078`, `#t: mojisurvivor-mod`)
+   * using a freshly generated one-time ephemeral keypair (`generateSecretKey()`).
+   *
+   * Anchors reports on `npub` (`p` tag) and/or canonical 64-hex SHA-256 `emojiHash` (`x` tag) —
+   * never shortcodes — while keeping the reporter's personal Nostr identity 100% private.
+   */
+  public buildAnonymousModerationReportEvent(opts: {
+    targetPubkeyOrNpub?: string;
+    emojiHash?: string;
+    verdict: 'nsfw_ban' | 'nsfw_hash' | 'safe_nomination';
+    packTitle?: string;
+    packDTag?: string;
+    reason?: string;
+  }):
+    | {
+        ok: true;
+        event: NostrEvent;
+        targetHex?: string;
+        targetNpub?: string;
+        emojiHash?: string;
+      }
+    | { ok: false; error: string } {
+    const targetHex = normalizePubkeyOrNpub(opts.targetPubkeyOrNpub) ?? undefined;
+    const cleanEmojiHash = normalizeEmojiHash(opts.emojiHash) ?? undefined;
+
+    if (opts.verdict === 'nsfw_hash') {
+      if (!cleanEmojiHash) {
+        return {
+          ok: false,
+          error: 'Enter a valid 64-character hex SHA-256 emoji hash.',
+        };
+      }
+    } else if (!targetHex) {
+      return {
+        ok: false,
+        error: 'Enter a valid npub1… or 64-character hex public key.',
+      };
+    }
+
+    const targetNpub = targetHex ? pubkeyHexToNpub(targetHex) : undefined;
+    const ephemeralSk = generateSecretKey();
+
+    const cleanPackTitle = sanitizeDisplayText(opts.packTitle, 48);
+    const cleanPackDTag = sanitizeDisplayText(opts.packDTag, 40);
+    const cleanReason = sanitizeDisplayText(
+      opts.reason ||
+        (opts.verdict === 'safe_nomination'
+          ? 'Verified safe custom emoji pack publisher'
+          : opts.verdict === 'nsfw_hash'
+            ? 'NSFW custom emoji media SHA-256 hash'
+            : 'NSFW custom emoji pack publisher'),
+      120
+    );
+
+    const primaryId = opts.verdict === 'nsfw_hash' ? cleanEmojiHash! : targetHex!;
+    const tags: string[][] = [
+      ['d', `mojisurvivor:mod:${opts.verdict}:${primaryId}`],
+      ['t', MODERATION_REPORT_TOPIC],
+      ['L', 'mojisurvivor.moderation'],
+      [
+        'l',
+        opts.verdict === 'safe_nomination'
+          ? 'safe-pack'
+          : opts.verdict === 'nsfw_hash'
+            ? 'nsfw-hash'
+            : 'nsfw-ban',
+        'mojisurvivor.moderation',
+      ],
+      ['client', 'mojisurvivor'],
+    ];
+
+    if (targetHex && targetNpub) {
+      tags.push(['p', targetHex]);
+      tags.push(['npub', targetNpub]);
+    }
+    if (cleanEmojiHash) {
+      tags.push(['x', cleanEmojiHash]);
+    }
+    if (cleanPackTitle) tags.push(['pack_title', cleanPackTitle]);
+    if (cleanPackDTag) tags.push(['pack_d', cleanPackDTag]);
+
+    const altTarget =
+      opts.verdict === 'nsfw_hash'
+        ? `sha256:${cleanEmojiHash!.slice(0, 16)}`
+        : targetNpub!;
+    tags.push([
+      'alt',
+      `MojiSurvivor anonymous ${
+        opts.verdict === 'safe_nomination'
+          ? 'safe list nomination'
+          : opts.verdict === 'nsfw_hash'
+            ? 'NSFW emoji hash report'
+            : 'NSFW npub report'
+      }: ${altTarget}`,
+    ]);
+
+    const contentPayload = {
+      version: 2,
+      verdict: opts.verdict,
+      targetPubkey: targetHex,
+      targetNpub,
+      emojiHash: cleanEmojiHash,
+      packTitle: cleanPackTitle,
+      packDTag: cleanPackDTag,
+      reason: cleanReason,
+    };
+
+    const signed = finalizeEvent(
+      {
+        kind: 30078,
+        created_at: Math.floor(Date.now() / 1000),
+        tags,
+        content: JSON.stringify(contentPayload),
+      },
+      ephemeralSk
+    );
+
+    return {
+      ok: true,
+      event: signed,
+      targetHex,
+      targetNpub,
+      emojiHash: cleanEmojiHash,
+    };
+  }
+
+  /**
+   * Verifies and ingests a `kind: 30078` `#t: mojisurvivor-mod` event from relays
+   * into the inspectable text-only Moderation Reports table (never preloading reported media).
+   */
+  public ingestModerationReportEvent(ev: NostrEvent): boolean {
+    if (!ev || ev.kind !== 30078 || !verifyEvent(ev)) return false;
+
+    const dTag = ev.tags.find((t) => t[0] === 'd')?.[1] ?? '';
+    const match = MOD_REPORT_D_TAG_PATTERN.exec(dTag);
+    if (!match) return false;
+
+    const hasTopic = ev.tags.some(
+      (t) => t[0] === 't' && t[1] === MODERATION_REPORT_TOPIC
+    );
+    if (!hasTopic) return false;
+
+    const verdict = match[1].toLowerCase() as
+      | 'nsfw_ban'
+      | 'nsfw_hash'
+      | 'safe_nomination';
+    const dSubjectHex = match[2].toLowerCase();
+
+    const pTag = normalizePubkeyOrNpub(ev.tags.find((t) => t[0] === 'p')?.[1]);
+    const xTag = normalizeEmojiHash(ev.tags.find((t) => t[0] === 'x')?.[1]);
+
+    if (verdict === 'nsfw_hash') {
+      if (xTag && xTag !== dSubjectHex) return false;
+    } else {
+      if (pTag && pTag !== dSubjectHex) return false;
+    }
+
+    const targetPubkey = verdict === 'nsfw_hash' ? (pTag ?? undefined) : dSubjectHex;
+    const targetNpub = targetPubkey ? pubkeyHexToNpub(targetPubkey) : undefined;
+    const emojiHash = verdict === 'nsfw_hash' ? dSubjectHex : (xTag ?? undefined);
+
+    const packTitle = sanitizeDisplayText(
+      ev.tags.find((t) => t[0] === 'pack_title')?.[1],
+      48
+    );
+    const packDTag = sanitizeDisplayText(ev.tags.find((t) => t[0] === 'pack_d')?.[1], 40);
+
+    let reason: string | undefined;
+    try {
+      if (ev.content) {
+        const parsed = JSON.parse(ev.content) as { reason?: string };
+        reason = sanitizeDisplayText(parsed.reason, 120);
+      }
+    } catch {
+      // Ignore optional content JSON
+    }
+
+    const key = `${verdict}:${dSubjectHex}`;
+    const existing = this.moderationReports.get(key);
+    const reporterPub = ev.pubkey.toLowerCase();
+
+    if (!existing) {
+      this.moderationReports.set(key, {
+        key,
+        targetPubkey,
+        targetNpub,
+        emojiHash,
+        verdict,
+        packTitle: packTitle || undefined,
+        packDTag: packDTag || undefined,
+        reason,
+        reportCount: 1,
+        latestCreatedAt: ev.created_at,
+        latestEventId: ev.id,
+        reporterPubkeys: [reporterPub],
+      });
+    } else {
+      const reporters = existing.reporterPubkeys.includes(reporterPub)
+        ? existing.reporterPubkeys
+        : [...existing.reporterPubkeys, reporterPub];
+      const isNewer = ev.created_at >= existing.latestCreatedAt;
+      this.moderationReports.set(key, {
+        ...existing,
+        targetPubkey: (isNewer && targetPubkey) || existing.targetPubkey,
+        targetNpub: (isNewer && targetNpub) || existing.targetNpub,
+        emojiHash: (isNewer && emojiHash) || existing.emojiHash,
+        packTitle: (isNewer && packTitle) || existing.packTitle,
+        packDTag: (isNewer && packDTag) || existing.packDTag,
+        reason: (isNewer && reason) || existing.reason,
+        reportCount: reporters.length,
+        latestCreatedAt: Math.max(existing.latestCreatedAt, ev.created_at),
+        latestEventId: isNewer ? ev.id : existing.latestEventId,
+        reporterPubkeys: reporters,
+      });
+    }
+    return true;
+  }
+
+  public async publishAnonymousModerationReport(opts: {
+    targetPubkeyOrNpub?: string;
+    emojiHash?: string;
+    verdict: 'nsfw_ban' | 'nsfw_hash' | 'safe_nomination';
+    packTitle?: string;
+    packDTag?: string;
+    reason?: string;
+  }): Promise<{
+    ok: boolean;
+    acceptedRelays: string[];
+    event?: NostrEvent;
+    targetHex?: string;
+    targetNpub?: string;
+    emojiHash?: string;
+    error?: string;
+  }> {
+    const built = this.buildAnonymousModerationReportEvent(opts);
+    if (!built.ok) {
+      return { ok: false, acceptedRelays: [], error: built.error };
+    }
+
+    this.ingestModerationReportEvent(built.event);
+    this.emit();
+
+    if (this.disableNetwork || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+      return {
+        ok: true,
+        acceptedRelays: [],
+        event: built.event,
+        targetHex: built.targetHex,
+        targetNpub: built.targetNpub,
+        emojiHash: built.emojiHash,
+      };
+    }
+
+    const { accepted, rejected } = await this.broadcastSignedEventToRelays(built.event);
+    this.emit();
+    if (accepted.length > 0) {
+      return {
+        ok: true,
+        acceptedRelays: accepted,
+        event: built.event,
+        targetHex: built.targetHex,
+        targetNpub: built.targetNpub,
+        emojiHash: built.emojiHash,
+      };
+    }
+
+    const firstErr = Object.values(rejected)[0];
+    return {
+      ok: false,
+      acceptedRelays: [],
+      event: built.event,
+      targetHex: built.targetHex,
+      targetNpub: built.targetNpub,
+      emojiHash: built.emojiHash,
+      error: firstErr || 'Applied locally; relays did not confirm anonymous report yet.',
+    };
+  }
+
+  public async syncModerationReports(): Promise<RelayModerationReport[]> {
+    if (this.disableNetwork || this.syncingModerationReports) {
+      return this.getSortedModerationReports();
+    }
+    this.syncingModerationReports = true;
+    this.emit();
+
+    try {
+      const events = await this.pool.query(
+        [{ kinds: [30078], '#t': [MODERATION_REPORT_TOPIC], limit: 200 }],
+        { signal: AbortSignal.timeout(8500) }
+      );
+      for (const ev of events) {
+        this.ingestModerationReportEvent(ev);
+      }
+    } catch {
+      // Non-fatal relay report lookup timeout
+    } finally {
+      this.syncingModerationReports = false;
+      this.emit();
+    }
+
+    return this.getSortedModerationReports();
+  }
+
+  public getSortedModerationReports(
+    verdictFilter?: 'all' | 'nsfw_ban' | 'nsfw_hash' | 'safe_nomination'
+  ): RelayModerationReport[] {
+    return Array.from(this.moderationReports.values())
+      .filter(
+        (r) =>
+          !verdictFilter || verdictFilter === 'all' || r.verdict === verdictFilter
+      )
+      .sort(
+        (a, b) =>
+          b.reportCount - a.reportCount || b.latestCreatedAt - a.latestCreatedAt
+      );
   }
 
   public async syncGlobalLeaderboard(): Promise<void> {
@@ -1866,6 +2420,7 @@ export class MojiNostrCoordinator {
       totalRuns: state.totalRuns,
       upgrades: state.upgrades,
       codex: codexMap,
+      safePackAuthors: state.safePackAuthors.slice(0, 300),
       creditedRuns: ledgerMap,
     };
 
@@ -2151,7 +2706,7 @@ export class MojiNostrCoordinator {
     const ready: EmojiCombatTrait[] = [];
     for (const trait of this.emojis.values()) {
       const status = this.imageStatus.get(trait.url);
-      if (status === 'ready' || trait.url.startsWith('data:image/svg+xml;')) {
+      if (status === 'ready' || isGenuineReserveSvgUrl(trait.url)) {
         ready.push(trait);
       }
     }

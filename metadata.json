@@ -2,5 +2,7 @@
   "name": "MojiSurvivor",
   "description": "Retro-arcade Nostr survivor action game anchored on Nostrify and nostr-tools with live NIP-30 custom emoji discovery, BIP-340 Schnorr run receipts, and NIP-07, NIP-46, and NIP-55 signers.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

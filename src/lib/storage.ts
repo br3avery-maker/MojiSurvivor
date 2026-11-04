@@ -1,11 +1,19 @@
 import type { NostrEvent } from '@nostrify/nostrify';
 import {
   deriveEmojiStats,
+  isGenuineReserveSvgUrl,
   RESERVE_EMOJI_DEFS,
   type BehaviorArchetype,
   type EmojiCombatTrait,
   type EmojiTier,
 } from './cryptoStats';
+import {
+  getBuiltInBannedHashesSet,
+  getBuiltInBannedHexSet,
+  normalizeEmojiHashList,
+  normalizePubkeyList,
+  type EmojiFilterMode,
+} from './moderationLists';
 import { sanitizeDisplayText, sanitizeRelayUrl, sanitizeShortcode, sanitizeUrl } from './sanitizeUrl';
 
 export interface UpgradeLevels {
@@ -57,6 +65,7 @@ export type ReceiptPublishStatus =
 
 export interface FeaturedEmojiSummary {
   emojiKey: string;
+  hash?: string;
   shortcode: string;
   url: string;
   tier: EmojiTier;
@@ -90,6 +99,12 @@ export interface RunReceiptRecord {
 
 export type CodexViewMode = 'gallery' | 'stats';
 
+export type ArenaBgStyleSetting =
+  | 'auto'
+  | 'dungeon_circuit'
+  | 'citadel_plates'
+  | 'starlight_grid';
+
 export interface GameSettings {
   sfx: boolean;
   haptics: boolean;
@@ -99,6 +114,9 @@ export interface GameSettings {
   denseParticles: boolean;
   reducedMotion: boolean;
   codexViewMode: CodexViewMode;
+  emojiFilterMode: EmojiFilterMode;
+  arenaBgStyle?: ArenaBgStyleSetting;
+  opaqueAssetBacking?: boolean;
 }
 
 /**
@@ -159,9 +177,16 @@ export interface PersistedGameState {
   totalKills: number;
   totalRuns: number;
 
-  // Permanent upgrades, self-contained Codex, receipts, ledger, sync, settings
+  // First-time Nostr relay content warning acknowledgment timestamp (`null` until accepted)
+  contentWarningAcceptedAt: number | null;
+
+  // Permanent upgrades, hash-addressed Codex, private NSFW npub & hash ban lists, Safe List, receipts, sync
   upgrades: UpgradeLevels;
   codex: Record<string, CodexKillRecord>;
+  blockedEmojiKeys: string[];
+  nsfwBanPubkeys: string[];
+  nsfwBanEmojiHashes: string[];
+  safePackAuthors: string[];
   creditedRuns: Record<string, CreditedRunLedgerEntry>;
   localReceipts: RunReceiptRecord[];
   progressSync: NostrProgressSyncState;
@@ -357,7 +382,7 @@ export function codexRecordToTrait(rec: CodexKillRecord): EmojiCombatTrait {
     packAuthor: rec.packAuthor,
     packDTag: rec.packDTag,
     eventId: rec.eventId,
-    emojiKeyOverride: rec.emojiKey,
+    hashOverride: rec.hash,
   });
 }
 
@@ -389,6 +414,7 @@ export function createDefaultState(): PersistedGameState {
     bestWave: 1,
     totalKills: 0,
     totalRuns: 0,
+    contentWarningAcceptedAt: null,
     upgrades: {
       attack: 0,
       defense: 0,
@@ -397,6 +423,10 @@ export function createDefaultState(): PersistedGameState {
       magnet: 0,
     },
     codex: {},
+    blockedEmojiKeys: [],
+    nsfwBanPubkeys: [],
+    nsfwBanEmojiHashes: [],
+    safePackAuthors: [],
     creditedRuns: {},
     localReceipts: [],
     progressSync: {
@@ -415,15 +445,12 @@ export function createDefaultState(): PersistedGameState {
       flashingEffects: !reduced,
       denseParticles: !reduced,
       reducedMotion: reduced,
-      codexViewMode: 'stats',
+      codexViewMode: 'gallery',
+      emojiFilterMode: 'open_with_banlist',
+      arenaBgStyle: 'auto',
+      opaqueAssetBacking: true,
     },
   };
-}
-
-function makeFallbackLegacySvg(shortcode: string): string {
-  const label = shortcode.slice(0, 2).toUpperCase();
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect x="4" y="4" width="56" height="56" rx="16" fill="#180614" stroke="#FF1493" stroke-width="3"/><text x="32" y="38" text-anchor="middle" fill="#FFFFFF" font-family="monospace" font-size="18" font-weight="bold">${label}</text></svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
 function sanitizeUpgrades(raw: Partial<UpgradeLevels> | undefined): UpgradeLevels {
@@ -462,13 +489,79 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
   const rawTotalKills = Math.max(0, Math.floor(Number(src.totalKills ?? 0) || 0));
   const rawTotalRuns = Math.max(0, Math.floor(Number(src.totalRuns ?? 0) || 0));
 
-  // Normalize receipts
+  // Settings & npub Moderation Lists (zero keyword/shortcode censorship)
+  const rawSettings = (src.settings ?? {}) as Partial<GameSettings>;
+  const emojiFilterMode: EmojiFilterMode =
+    rawSettings.emojiFilterMode === 'safe_list_only'
+      ? 'safe_list_only'
+      : 'open_with_banlist';
+
+  const contentWarningAcceptedAt =
+    typeof src.contentWarningAcceptedAt === 'number' &&
+    Number.isFinite(src.contentWarningAcceptedAt) &&
+    src.contentWarningAcceptedAt > 0
+      ? Math.floor(src.contentWarningAcceptedAt)
+      : null;
+
+  const blockedEmojiKeys = Array.isArray(src.blockedEmojiKeys)
+    ? Array.from(
+        new Set(
+          src.blockedEmojiKeys
+            .filter((k): k is string => typeof k === 'string' && k.trim().length > 0)
+            .slice(0, 1000)
+        )
+      )
+    : [];
+
+  // Merge `nsfwBanPubkeys` and any legacy `blockedPackAuthors`
+  const rawBanCandidates: string[] = [
+    ...(Array.isArray(src.nsfwBanPubkeys)
+      ? src.nsfwBanPubkeys.filter((x): x is string => typeof x === 'string')
+      : []),
+    ...(Array.isArray(src.blockedPackAuthors)
+      ? src.blockedPackAuthors.filter((x): x is string => typeof x === 'string')
+      : []),
+  ];
+  const nsfwBanPubkeys = normalizePubkeyList(rawBanCandidates).slice(0, 500);
+  const nsfwBanEmojiHashes = normalizeEmojiHashList(
+    Array.isArray(src.nsfwBanEmojiHashes)
+      ? src.nsfwBanEmojiHashes.filter((x): x is string => typeof x === 'string')
+      : []
+  ).slice(0, 1000);
+
+  const safePackAuthors = normalizePubkeyList(
+    Array.isArray(src.safePackAuthors)
+      ? src.safePackAuthors.filter((x): x is string => typeof x === 'string')
+      : []
+  ).slice(0, 500);
+
+  const blockedKeySet = new Set(blockedEmojiKeys);
+  const bannedAuthorSet = new Set([...getBuiltInBannedHexSet(), ...nsfwBanPubkeys]);
+  const bannedHashSet = new Set([...getBuiltInBannedHashesSet(), ...nsfwBanEmojiHashes]);
+
+  // Normalize receipts (clearing featuredEmoji if its key or hash was banned, or if it used a fake SVG)
   const localReceipts: RunReceiptRecord[] = [];
   if (Array.isArray(src.localReceipts)) {
     for (const item of src.localReceipts.slice(0, 60)) {
       if (!item || typeof item !== 'object') continue;
       const r = item as Partial<RunReceiptRecord>;
       if (!r.localId || !r.dTag) continue;
+
+      let cleanFeatured = r.featuredEmoji;
+      if (cleanFeatured) {
+        const isFakeSvg =
+          cleanFeatured.url?.startsWith('data:image/svg+xml;') &&
+          !isGenuineReserveSvgUrl(cleanFeatured.url);
+        const featHash = cleanFeatured.hash?.toLowerCase();
+        if (
+          isFakeSvg ||
+          blockedKeySet.has(cleanFeatured.emojiKey) ||
+          (featHash && bannedHashSet.has(featHash))
+        ) {
+          cleanFeatured = undefined;
+        }
+      }
+
       localReceipts.push({
         localId: String(r.localId),
         runSessionId: r.runSessionId ? String(r.runSessionId) : String(r.localId),
@@ -487,7 +580,7 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
             : undefined,
         weaponsSummary: String(r.weaponsSummary ?? 'lightning_zap:1'),
         strongestSpellName: r.strongestSpellName ? String(r.strongestSpellName) : undefined,
-        featuredEmoji: r.featuredEmoji,
+        featuredEmoji: cleanFeatured,
         createdAt: Math.max(0, Math.floor(Number(r.createdAt ?? 0) || 0)),
         status:
           r.status === 'signing' || r.status === 'publishing'
@@ -566,51 +659,84 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
   );
   const career = derivePlayerCareerProgress(lifetimeXpEarned);
 
-  // Migrate Codex (supports both v2 shortcode-only records and v3 full metadata records)
+  // Migrate Codex to canonical 64-hex SHA-256 hash keys (`nip30:<hash>` / `reserve:<hash>`).
+  // Purges any legacy 2-letter shortcode monogram SVGs (`AN`, `CH`, `BE`, etc.) while preserving
+  // cumulative `totalKills`, `lifetimeXpEarned`, `playerLevel`, and `mojoBalance` untouched.
   const reserveByShortcode = new Map(
     RESERVE_EMOJI_DEFS.map((d) => [d.shortcode, d] as const)
   );
+  const reserveByUrl = new Map(RESERVE_EMOJI_DEFS.map((d) => [d.url, d] as const));
+
+  let rawCodexKillsFloor = 0;
   const codex: Record<string, CodexKillRecord> = {};
   if (src.codex && typeof src.codex === 'object') {
     for (const [rawKey, rawVal] of Object.entries(src.codex as Record<string, unknown>)) {
       if (!rawVal || typeof rawVal !== 'object') continue;
       const entry = rawVal as Partial<CodexKillRecord>;
-      const cleanCode = sanitizeShortcode(entry.shortcode || rawKey);
-      if (!cleanCode) continue;
       const kills = Math.max(0, Math.floor(Number(entry.kills ?? 0) || 0));
       if (kills <= 0) continue;
 
-      const reserveDef = reserveByShortcode.get(cleanCode);
-      const validUrl =
-        entry.url && entry.url.startsWith('data:image/svg+xml;')
-          ? entry.url
-          : sanitizeUrl(entry.url) || reserveDef?.url || makeFallbackLegacySvg(cleanCode);
-      const source: 'nip30' | 'reserve' =
-        entry.source === 'reserve' || Boolean(reserveDef && !entry.url) ? 'reserve' : 'nip30';
+      rawCodexKillsFloor += kills;
 
-      const derived = deriveEmojiStats(cleanCode, validUrl, source, {
-        packTitle: sanitizeDisplayText(entry.packTitle || reserveDef?.packTitle, 36),
-        packAuthor:
-          entry.packAuthor && /^[0-9a-f]{64}$/i.test(entry.packAuthor)
-            ? entry.packAuthor.toLowerCase()
-            : undefined,
-        packDTag: entry.packDTag ? sanitizeDisplayText(entry.packDTag, 32) : undefined,
-        eventId:
-          entry.eventId && /^[0-9a-f]{64}$/i.test(entry.eventId)
-            ? entry.eventId.toLowerCase()
-            : undefined,
-        emojiKeyOverride:
-          entry.emojiKey && (entry.emojiKey.startsWith('nip30:') || entry.emojiKey.startsWith('reserve:'))
-            ? entry.emojiKey
-            : undefined,
-      });
+      const cleanCode = sanitizeShortcode(entry.shortcode || rawKey);
+      const matchedReserve =
+        (entry.url ? reserveByUrl.get(entry.url) : undefined) ||
+        ((entry.source === 'reserve' || rawKey.startsWith('reserve:') || !entry.url) && cleanCode
+          ? reserveByShortcode.get(cleanCode)
+          : undefined);
 
-      const firstAt = Math.max(1, Math.floor(Number(entry.firstDefeatedAt ?? Date.now()) || Date.now()));
-      const lastAt = Math.max(firstAt, Math.floor(Number(entry.lastDefeatedAt ?? firstAt) || firstAt));
+      let validUrl: string | undefined;
+      let source: 'nip30' | 'reserve';
+
+      if (matchedReserve) {
+        validUrl = matchedReserve.url;
+        source = 'reserve';
+      } else {
+        // Strictly require a real https:// media URL for NIP-30 emojis (never fake 2-letter shortcode SVGs!)
+        validUrl = sanitizeUrl(entry.url);
+        source = 'nip30';
+      }
+
+      if (!validUrl) continue;
+
+      const derived = deriveEmojiStats(
+        cleanCode || matchedReserve?.shortcode || '',
+        validUrl,
+        source,
+        {
+          packTitle: sanitizeDisplayText(entry.packTitle || matchedReserve?.packTitle, 36),
+          packAuthor:
+            entry.packAuthor && /^[0-9a-f]{64}$/i.test(entry.packAuthor)
+              ? entry.packAuthor.toLowerCase()
+              : undefined,
+          packDTag: entry.packDTag ? sanitizeDisplayText(entry.packDTag, 32) : undefined,
+          eventId:
+            entry.eventId && /^[0-9a-f]{64}$/i.test(entry.eventId)
+              ? entry.eventId.toLowerCase()
+              : undefined,
+        }
+      );
+
+      if (blockedKeySet.has(derived.emojiKey) || blockedKeySet.has(rawKey)) continue;
+      if (bannedHashSet.has(derived.hash.toLowerCase())) continue;
+      if (derived.packAuthor && bannedAuthorSet.has(derived.packAuthor.toLowerCase())) continue;
+
+      const firstAt = Math.max(
+        1,
+        Math.floor(Number(entry.firstDefeatedAt ?? Date.now()) || Date.now())
+      );
+      const lastAt = Math.max(
+        firstAt,
+        Math.floor(Number(entry.lastDefeatedAt ?? firstAt) || firstAt)
+      );
 
       const existing = codex[derived.emojiKey];
       if (existing) {
-        existing.kills = Math.max(existing.kills, kills);
+        // Sum kills if distinct legacy shortcode keys collapsed onto the same canonical media hash
+        existing.kills =
+          rawKey !== derived.emojiKey
+            ? existing.kills + kills
+            : Math.max(existing.kills, kills);
         existing.firstDefeatedAt = Math.min(existing.firstDefeatedAt, firstAt);
         existing.lastDefeatedAt = Math.max(existing.lastDefeatedAt, lastAt);
       } else {
@@ -619,7 +745,10 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
     }
   }
 
-  const codexKillsFloor = Object.values(codex).reduce((acc, c) => acc + c.kills, 0);
+  const codexKillsFloor = Math.max(
+    rawCodexKillsFloor,
+    Object.values(codex).reduce((acc, c) => acc + c.kills, 0)
+  );
 
   // Relays
   const cleanedRelays = Array.isArray(src.relays)
@@ -633,7 +762,6 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
     : [];
 
   // Settings
-  const rawSettings = (src.settings ?? {}) as Partial<GameSettings>;
   const settings: GameSettings = {
     sfx: typeof rawSettings.sfx === 'boolean' ? rawSettings.sfx : base.settings.sfx,
     haptics: typeof rawSettings.haptics === 'boolean' ? rawSettings.haptics : base.settings.haptics,
@@ -657,7 +785,24 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
       typeof rawSettings.reducedMotion === 'boolean'
         ? rawSettings.reducedMotion
         : base.settings.reducedMotion,
-    codexViewMode: rawSettings.codexViewMode === 'gallery' ? 'gallery' : 'stats',
+    codexViewMode:
+      rawSettings.codexViewMode === 'stats'
+        ? 'stats'
+        : rawSettings.codexViewMode === 'gallery'
+          ? 'gallery'
+          : base.settings.codexViewMode,
+    emojiFilterMode,
+    arenaBgStyle:
+      rawSettings.arenaBgStyle === 'dungeon_circuit' ||
+      rawSettings.arenaBgStyle === 'citadel_plates' ||
+      rawSettings.arenaBgStyle === 'starlight_grid' ||
+      rawSettings.arenaBgStyle === 'auto'
+        ? rawSettings.arenaBgStyle
+        : 'auto',
+    opaqueAssetBacking:
+      typeof rawSettings.opaqueAssetBacking === 'boolean'
+        ? rawSettings.opaqueAssetBacking
+        : true,
   };
 
   // Progress Sync
@@ -688,6 +833,7 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
     revision: Math.max(0, Math.floor(Number(src.revision ?? 1) || 1)),
     updatedAt: Math.max(0, Math.floor(Number(src.updatedAt ?? 0) || 0)),
     ownerPubkey: typeof src.ownerPubkey === 'string' ? src.ownerPubkey : undefined,
+    contentWarningAcceptedAt,
     mojoBalance,
     lifetimeMojoEarned: Math.max(lifetimeMojoEarned, mojoBalance + spentOnUpgrades),
     lifetimeXpEarned,
@@ -706,6 +852,10 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
     totalRuns: Math.max(rawTotalRuns, localReceipts.length),
     upgrades,
     codex,
+    blockedEmojiKeys,
+    nsfwBanPubkeys,
+    nsfwBanEmojiHashes,
+    safePackAuthors,
     creditedRuns,
     localReceipts,
     progressSync,
@@ -758,20 +908,69 @@ export function reconcileProgressionStates(
     }
   }
 
-  // Merge Codex entries safely without losing metadata or kill counts
-  const mergedCodex: Record<string, CodexKillRecord> = { ...incoming.codex };
-  for (const [key, locEntry] of Object.entries(local.codex)) {
-    const remEntry = mergedCodex[key];
+  const mergedBlockedEmojiKeys = Array.from(
+    new Set([...(local.blockedEmojiKeys ?? []), ...(incoming.blockedEmojiKeys ?? [])])
+  ).slice(0, 1000);
+  const mergedNsfwBanPubkeys = normalizePubkeyList([
+    ...(local.nsfwBanPubkeys ?? []),
+    ...(incoming.nsfwBanPubkeys ?? []),
+  ]).slice(0, 500);
+  const mergedNsfwBanEmojiHashes = normalizeEmojiHashList([
+    ...(local.nsfwBanEmojiHashes ?? []),
+    ...(incoming.nsfwBanEmojiHashes ?? []),
+  ]).slice(0, 1000);
+  const mergedSafePackAuthors = normalizePubkeyList([
+    ...(local.safePackAuthors ?? []),
+    ...(incoming.safePackAuthors ?? []),
+  ]).slice(0, 500);
+
+  const blockedKeysSet = new Set(mergedBlockedEmojiKeys);
+  const bannedAuthorsSet = new Set([...getBuiltInBannedHexSet(), ...mergedNsfwBanPubkeys]);
+  const bannedHashesSet = new Set([
+    ...getBuiltInBannedHashesSet(),
+    ...mergedNsfwBanEmojiHashes,
+  ]);
+
+  const canonicalizeEntry = (rawEntry: CodexKillRecord): CodexKillRecord | null => {
+    const validReserve =
+      rawEntry.source === 'reserve' && isGenuineReserveSvgUrl(rawEntry.url);
+    const validHttps = rawEntry.source === 'nip30' && Boolean(sanitizeUrl(rawEntry.url));
+    if (!validReserve && !validHttps) return null;
+
+    const derived = codexRecordToTrait(rawEntry);
+    if (blockedKeysSet.has(derived.emojiKey) || blockedKeysSet.has(rawEntry.emojiKey)) {
+      return null;
+    }
+    if (bannedHashesSet.has(derived.hash.toLowerCase())) return null;
+    if (derived.packAuthor && bannedAuthorsSet.has(derived.packAuthor.toLowerCase())) {
+      return null;
+    }
+    return traitToCodexRecord(
+      derived,
+      rawEntry.kills,
+      rawEntry.firstDefeatedAt,
+      rawEntry.lastDefeatedAt
+    );
+  };
+
+  // Merge Codex entries by canonical 64-hex SHA-256 hash without reintroducing fake SVG placeholders
+  const mergedCodex: Record<string, CodexKillRecord> = {};
+  for (const rawEntry of Object.values(incoming.codex)) {
+    const clean = canonicalizeEntry(rawEntry);
+    if (!clean) continue;
+    mergedCodex[clean.emojiKey] = clean;
+  }
+  for (const rawLoc of Object.values(local.codex)) {
+    const locEntry = canonicalizeEntry(rawLoc);
+    if (!locEntry) continue;
+
+    const remEntry = mergedCodex[locEntry.emojiKey];
     if (!remEntry) {
-      mergedCodex[key] = { ...locEntry };
+      mergedCodex[locEntry.emojiKey] = locEntry;
     } else {
       const preferMeta =
-        locEntry.source === 'nip30' && remEntry.source !== 'nip30'
-          ? locEntry
-          : remEntry.url.startsWith('https://') && !locEntry.url.startsWith('https://')
-            ? remEntry
-            : locEntry;
-      mergedCodex[key] = {
+        locEntry.packTitle && !remEntry.packTitle ? locEntry : remEntry;
+      mergedCodex[locEntry.emojiKey] = {
         ...preferMeta,
         kills: Math.max(locEntry.kills, remEntry.kills),
         firstDefeatedAt: Math.min(locEntry.firstDefeatedAt, remEntry.firstDefeatedAt),
@@ -848,6 +1047,8 @@ export function reconcileProgressionStates(
     revision: Math.max(local.revision, incoming.revision) + 1,
     updatedAt: Date.now(),
     ownerPubkey: local.ownerPubkey || incoming.ownerPubkey,
+    contentWarningAcceptedAt:
+      local.contentWarningAcceptedAt || incoming.contentWarningAcceptedAt || null,
     mojoBalance,
     lifetimeMojoEarned,
     lifetimeXpEarned,
@@ -865,6 +1066,10 @@ export function reconcileProgressionStates(
     ),
     upgrades: mergedUpgrades,
     codex: mergedCodex,
+    blockedEmojiKeys: mergedBlockedEmojiKeys,
+    nsfwBanPubkeys: mergedNsfwBanPubkeys,
+    nsfwBanEmojiHashes: mergedNsfwBanEmojiHashes,
+    safePackAuthors: mergedSafePackAuthors,
     creditedRuns: mergedCreditedRuns,
     localReceipts: mergedReceipts,
     progressSync: {
