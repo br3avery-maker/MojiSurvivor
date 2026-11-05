@@ -1,0 +1,26 @@
+{
+  "names": {},
+  "relays": {},
+  "nip46": {
+    "relays": [
+      "wss://relay.primal.net",
+      "wss://relay.nsec.app"
+    ]
+  },
+  "nsite": {
+    "name": "MojiSurvivor",
+    "permissions": [
+      "getPublicKey",
+      "signEvent",
+      "relays",
+      "storage"
+    ],
+    "allowed_kinds": [0, 1, 5, 10030, 30030, 30078],
+    "relays": [
+      "wss://relay.primal.net",
+      "wss://relay.nostr.band",
+      "wss://offchain.pub",
+      "wss://nostr.mom"
+    ]
+  }
+}

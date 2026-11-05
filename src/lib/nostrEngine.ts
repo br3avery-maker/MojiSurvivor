@@ -45,11 +45,37 @@ import {
 } from './sanitizeUrl';
 import {
   codexRecordToTrait,
+  DEFAULT_RELAYS,
+  DEPRECATED_OR_PAID_RELAYS,
   normalizeAndMigrateState,
   type CodexKillRecord,
   type PersistedGameState,
   type RunReceiptRecord,
 } from './storage';
+
+export interface RelayProbeResult {
+  url: string;
+  status: 'online' | 'unreachable' | 'paid_or_restricted';
+  latencyMs: number;
+  servesGameKinds: boolean;
+  eventsSampled: number;
+  checkedAt: number;
+  reason?: string;
+}
+
+export const FREE_PUBLIC_RELAY_CANDIDATES: readonly string[] = [
+  'wss://relay.primal.net',
+  'wss://relay.nostr.band',
+  'wss://offchain.pub',
+  'wss://nostr.mom',
+  'wss://relay.snort.social',
+  'wss://nostr.oxtr.dev',
+  'wss://relay.mostr.pub',
+  'wss://nostr.einundzwanzig.space',
+  'wss://relay.nostr.bg',
+  'wss://nostr.fmt.wiz.biz',
+  'wss://purplepag.es',
+];
 
 export type SignerMode = 'guest' | 'nsec' | 'nip07' | 'nip46' | 'nip55';
 
@@ -302,7 +328,12 @@ export class MojiNostrCoordinator {
 
   public syncingEmojis = false;
   public syncingLeaderboard = false;
+  public probingRelays = false;
+  public autoManageRelays = true;
+  private hasPerformedInitialProbe = false;
+  private onAutoRelaysUpdated?: (relays: string[]) => void;
   public relayReachability = new Map<string, 'idle' | 'ok' | 'error'>();
+  public relayHealth = new Map<string, RelayProbeResult>();
   public lastSyncError: string | null = null;
   public filteredEmojiCount = 0;
   public moderationReports = new Map<string, RelayModerationReport>();
@@ -322,6 +353,8 @@ export class MojiNostrCoordinator {
     initialCodex?: Record<string, CodexKillRecord>,
     options?: {
       disableNetwork?: boolean;
+      autoManageRelays?: boolean;
+      onAutoRelaysUpdated?: (relays: string[]) => void;
       emojiFilterMode?: EmojiFilterMode;
       nsfwBanPubkeys?: string[];
       nsfwBanEmojiHashes?: string[];
@@ -330,6 +363,8 @@ export class MojiNostrCoordinator {
     }
   ) {
     this.disableNetwork = Boolean(options?.disableNetwork);
+    this.autoManageRelays = options?.autoManageRelays ?? true;
+    this.onAutoRelaysUpdated = options?.onAutoRelaysUpdated;
     if (options?.emojiFilterMode) {
       this.emojiFilterMode = options.emojiFilterMode;
     }
@@ -350,9 +385,12 @@ export class MojiNostrCoordinator {
 
     this.relays = initialRelays
       .map((r) => sanitizeRelayUrl(r))
-      .filter((r): r is string => Boolean(r));
+      .filter(
+        (r): r is string =>
+          Boolean(r) && (!this.autoManageRelays || !DEPRECATED_OR_PAID_RELAYS.has(r!))
+      );
     if (this.relays.length === 0) {
-      this.relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
+      this.relays = [...DEFAULT_RELAYS];
     }
 
     this.loadDeletedTombstones();
@@ -549,7 +587,7 @@ export class MojiNostrCoordinator {
         return routes;
       },
       eventRouter: () => [...this.relays],
-      eoseTimeout: 650,
+      eoseTimeout: 1400,
     });
   }
 
@@ -568,6 +606,147 @@ export class MojiNostrCoordinator {
 
   public getRelays(): string[] {
     return [...this.relays];
+  }
+
+  public setAutoManageRelays(
+    enabled: boolean,
+    onAutoRelaysUpdated?: (relays: string[]) => void
+  ): void {
+    if (onAutoRelaysUpdated) {
+      this.onAutoRelaysUpdated = onAutoRelaysUpdated;
+    }
+    const changed = this.autoManageRelays !== enabled;
+    this.autoManageRelays = enabled;
+    this.emit();
+    if (enabled && changed) {
+      void this.scanAndSelectHealthyRelays(true).then(() => {
+        void this.syncAll();
+      });
+    }
+  }
+
+  /**
+   * Probes a single relay URL for WebSocket reachability, NIP-11 payment/auth restrictions,
+   * round-trip latency, and whether it serves our game event kinds (`30030`, `10030`, `30078`).
+   */
+  public async probeRelayHealth(
+    rawUrl: string,
+    timeoutMs = 3400
+  ): Promise<RelayProbeResult> {
+    const url = sanitizeRelayUrl(rawUrl) ?? rawUrl;
+    if (DEPRECATED_OR_PAID_RELAYS.has(url)) {
+      const restricted: RelayProbeResult = {
+        url,
+        status: 'paid_or_restricted',
+        latencyMs: 0,
+        servesGameKinds: false,
+        eventsSampled: 0,
+        checkedAt: Date.now(),
+        reason: 'Paid, retired, or incompatible relay',
+      };
+      this.relayHealth.set(url, restricted);
+      this.relayReachability.set(url, 'error');
+      return restricted;
+    }
+
+    const startMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    let tempRelay: NRelay1 | null = null;
+    try {
+      tempRelay = new NRelay1(url, { idleTimeout: 4000 });
+      const events = await tempRelay.query(
+        [{ kinds: [30030, 10030, 30078], limit: 3 }],
+        { signal: AbortSignal.timeout(timeoutMs) }
+      );
+      const endMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const latencyMs = Math.max(1, Math.round(endMs - startMs));
+      const result: RelayProbeResult = {
+        url,
+        status: 'online',
+        latencyMs,
+        servesGameKinds: events.length > 0,
+        eventsSampled: events.length,
+        checkedAt: Date.now(),
+      };
+      this.relayHealth.set(url, result);
+      this.relayReachability.set(url, 'ok');
+      return result;
+    } catch (err) {
+      const endMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const reason = err instanceof Error ? err.message : 'Connection timeout';
+      const isPaidOrRestricted = /paid|payment|restricted|auth-required|blocked/i.test(reason);
+      const result: RelayProbeResult = {
+        url,
+        status: isPaidOrRestricted ? 'paid_or_restricted' : 'unreachable',
+        latencyMs: Math.max(1, Math.round(endMs - startMs)),
+        servesGameKinds: false,
+        eventsSampled: 0,
+        checkedAt: Date.now(),
+        reason,
+      };
+      this.relayHealth.set(url, result);
+      this.relayReachability.set(url, 'error');
+      return result;
+    } finally {
+      if (tempRelay) {
+        try {
+          await tempRelay.close();
+        } catch {
+          // Ignore close errors
+        }
+      }
+    }
+  }
+
+  /**
+   * Scans the candidate pool of free public relays on startup or manual trigger,
+   * identifies which relays are online, responsive, and serving our event kinds,
+   * and prunes dead/unresponsive relays so the app never repeatedly pings dead endpoints.
+   */
+  public async scanAndSelectHealthyRelays(forceRescan = false): Promise<string[]> {
+    if (this.disableNetwork) return this.relays;
+    if (this.probingRelays) return this.relays;
+    if (!this.autoManageRelays && !forceRescan) return this.relays;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return this.relays;
+
+    this.probingRelays = true;
+    this.emit();
+
+    try {
+      const candidateSet = new Set<string>([
+        ...this.relays.filter((r) => !DEPRECATED_OR_PAID_RELAYS.has(r)),
+        ...FREE_PUBLIC_RELAY_CANDIDATES,
+      ]);
+      const candidates = Array.from(candidateSet);
+      const probeResults = await Promise.all(
+        candidates.map((url) => this.probeRelayHealth(url, 3200))
+      );
+
+      const onlineRelays = probeResults
+        .filter((r) => r.status === 'online')
+        .sort((a, b) => {
+          // Always prioritize wss://relay.primal.net if online
+          if (a.url === 'wss://relay.primal.net') return -1;
+          if (b.url === 'wss://relay.primal.net') return 1;
+          // Prefer relays that returned game event kinds (30030 / 10030 / 30078)
+          if (a.servesGameKinds !== b.servesGameKinds) {
+            return a.servesGameKinds ? -1 : 1;
+          }
+          return a.latencyMs - b.latencyMs;
+        });
+
+      if (onlineRelays.length > 0 && this.autoManageRelays) {
+        const selected = onlineRelays.slice(0, 4).map((r) => r.url);
+        this.relays = selected;
+        this.hasPerformedInitialProbe = true;
+        this.onAutoRelaysUpdated?.(selected);
+      } else if (this.autoManageRelays && this.relays.length === 0) {
+        this.relays = ['wss://relay.primal.net'];
+      }
+      return [...this.relays];
+    } finally {
+      this.probingRelays = false;
+      this.emit();
+    }
   }
 
   public setRelays(nextRelays: string[]): void {
@@ -1370,8 +1549,14 @@ export class MojiNostrCoordinator {
   /**
    * Synchronizes NIP-30 custom emoji packs (including referenced kind:30030 sets from kind:10030)
    * and verified global leaderboard runs from relays.
+   * When `autoManageRelays` is enabled, probes candidate free relays on initial startup first
+   * so unresponsive relays are pruned before querying.
    */
   public async syncAll(): Promise<void> {
+    if (!this.disableNetwork && this.autoManageRelays && !this.hasPerformedInitialProbe) {
+      this.hasPerformedInitialProbe = true;
+      await this.scanAndSelectHealthyRelays(false);
+    }
     await Promise.allSettled([
       this.syncNip30Emojis(),
       this.syncGlobalLeaderboard(),
@@ -1949,7 +2134,9 @@ export class MojiNostrCoordinator {
       }
 
       for (const url of this.relays) {
-        this.relayReachability.set(url, 'ok');
+        if (this.relayReachability.get(url) !== 'error') {
+          this.relayReachability.set(url, 'ok');
+        }
       }
 
       if (authorSet.size > 0) {
@@ -2180,7 +2367,7 @@ export class MojiNostrCoordinator {
       this.relays.map(async (relayUrl) => {
         try {
           const relay = this.pool.relay(relayUrl);
-          await relay.event(signedEvent, { signal: AbortSignal.timeout(9000) });
+          await relay.event(signedEvent, { signal: AbortSignal.timeout(7500) });
           accepted.push(relayUrl);
           this.relayReachability.set(relayUrl, 'ok');
         } catch (err) {
@@ -2190,6 +2377,13 @@ export class MojiNostrCoordinator {
         }
       })
     );
+
+    // If autoManageRelays is active and some relays accepted while others failed/timed out,
+    // prune the unresponsive relays so future broadcasts/queries don't stall on them
+    if (this.autoManageRelays && accepted.length > 0 && Object.keys(rejected).length > 0) {
+      this.relays = [...accepted];
+      this.onAutoRelaysUpdated?.([...accepted]);
+    }
 
     return { accepted, rejected };
   }
@@ -2414,9 +2608,13 @@ export class MojiNostrCoordinator {
       lifetimeMojoEarned: state.lifetimeMojoEarned,
       lifetimeXpEarned: state.lifetimeXpEarned,
       playerLevel: state.playerLevel,
+      rebirthCount: state.rebirthCount ?? 0,
+      mojoSpentOnRebirths: state.mojoSpentOnRebirths ?? 0,
       highScore: state.highScore,
+      lifetimeScore: state.lifetimeScore ?? state.highScore,
       bestWave: state.bestWave,
       totalKills: state.totalKills,
+      totalBossKills: state.totalBossKills ?? 0,
       totalRuns: state.totalRuns,
       upgrades: state.upgrades,
       codex: codexMap,
@@ -2433,13 +2631,16 @@ export class MojiNostrCoordinator {
         ['p', this.pubkey.toLowerCase()],
         ['schema', '3'],
         ['level', String(state.playerLevel)],
+        ['rebirth', String(state.rebirthCount ?? 0)],
         ['mojo', String(state.mojoBalance)],
         ['high_score', String(state.highScore)],
         ['best_wave', String(state.bestWave)],
         ['client', 'mojisurvivor'],
         [
           'alt',
-          `MojiSurvivor progression save: Player Level ${state.playerLevel}, Best Score ${state.highScore.toLocaleString()}`,
+          `MojiSurvivor progression save: Player Level ${state.playerLevel}${
+            (state.rebirthCount ?? 0) > 0 ? ` (Rebirth ${state.rebirthCount})` : ''
+          }, Best Score ${state.highScore.toLocaleString()}`,
         ],
       ],
       content: JSON.stringify(publicPayload),

@@ -87,6 +87,12 @@ interface IdentitySettingsViewProps {
     publishNomination?: boolean;
   }) => void;
   onRemoveSafeAuthor: (pubkeyHex: string) => void;
+  onImportCuratorBlocklist?: (rawJson: string) => {
+    ok: boolean;
+    addedPubkeys: number;
+    addedHashes: number;
+    error?: string;
+  };
   onRefreshModerationReports: () => Promise<void>;
 }
 
@@ -120,6 +126,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
   onUnbanEmojiHash,
   onAddSafeAuthor,
   onRemoveSafeAuthor,
+  onImportCuratorBlocklist,
   onRefreshModerationReports,
 }) => {
   const [openPanel, setOpenPanel] = useState<AccordionPanel | null>(initialPanel);
@@ -144,6 +151,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
   const [banHashInput, setBanHashInput] = useState('');
   const [banNpubInput, setBanNpubInput] = useState('');
   const [safeNpubInput, setSafeNpubInput] = useState('');
+  const [curatorJsonInput, setCuratorJsonInput] = useState('');
   const [reportTab, setReportTab] = useState<'all' | 'nsfw' | 'safe_nomination'>('all');
 
   useEffect(() => {
@@ -275,8 +283,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
     }
   };
 
-  const handleConnectBunker = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleConnectBunker = async () => {
     if (!bunkerInput.trim()) return;
     setErrorMessage(null);
     setStatusMessage(null);
@@ -310,8 +317,8 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
     window.location.href = uri;
   };
 
-  const handleBindNip55 = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleBindNip55 = () => {
+    if (!nip55PubkeyInput.trim()) return;
     setErrorMessage(null);
     setStatusMessage(null);
     const res = coordinator.connectNip55WithPubkey(nip55PubkeyInput);
@@ -323,8 +330,8 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
     }
   };
 
-  const handleImportNsec = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleImportNsec = () => {
+    if (!nsecImportInput.trim()) return;
     setErrorMessage(null);
     setStatusMessage(null);
     const res = coordinator.importNsecKey(nsecImportInput);
@@ -404,8 +411,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
     }
   };
 
-  const handleAddRelay = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleAddRelay = () => {
     const cleaned = sanitizeRelayUrl(newRelayInput);
     if (!cleaned) {
       setErrorMessage('Enter a valid wss:// relay URL.');
@@ -418,6 +424,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
     onUpdateRelays([...relays, cleaned]);
     setNewRelayInput('');
     setErrorMessage(null);
+    setStatusMessage(`Added custom relay ${cleaned}.`);
   };
 
   const handleRemoveRelay = (url: string) => {
@@ -426,6 +433,48 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
       return;
     }
     onUpdateRelays(relays.filter((r) => r !== url));
+  };
+
+  const handleScanRelaysNow = async () => {
+    setErrorMessage(null);
+    setStatusMessage(null);
+    setBusyAction('scan_relays');
+    const selected = await coordinator.scanAndSelectHealthyRelays(true);
+    setBusyAction(null);
+    onUpdateRelays(selected);
+    setStatusMessage(
+      `Probed free public relays: ${selected.length} responsive relay(s) selected (${selected.join(', ')}).`
+    );
+  };
+
+  const handleToggleAutoManageRelays = (nextAuto: boolean) => {
+    coordinator.setAutoManageRelays(nextAuto);
+    onUpdateSettings({
+      ...settings,
+      autoManageRelays: nextAuto,
+    });
+    if (nextAuto) {
+      void handleScanRelaysNow();
+    } else {
+      setStatusMessage(
+        'Switched to Manual Relay Mode. You can now add or remove custom wss:// relays.'
+      );
+    }
+  };
+
+  const handleImportCuratorJson = () => {
+    if (!curatorJsonInput.trim() || !onImportCuratorBlocklist) return;
+    setErrorMessage(null);
+    setStatusMessage(null);
+    const res = onImportCuratorBlocklist(curatorJsonInput.trim());
+    if (res.ok) {
+      setCuratorJsonInput('');
+      setStatusMessage(
+        `Imported moji-curator-blocklist/v1: +${res.addedPubkeys} publisher npub(s) and +${res.addedHashes} emoji SHA-256 hash(es) blocked.`
+      );
+    } else {
+      setErrorMessage(res.error ?? 'Failed to parse blocklist JSON.');
+    }
   };
 
   const signerLabel =
@@ -699,22 +748,29 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                       </div>
                     )}
 
-                    <form onSubmit={handleBindNip55} className="flex gap-1.5">
+                    <div className="flex gap-1.5">
                       <input
                         type="text"
                         value={nip55PubkeyInput}
                         onChange={(e) => setNip55PubkeyInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleBindNip55();
+                          }
+                        }}
                         placeholder="Or paste Amber npub1… / hex"
                         className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[#111111] border border-white/15 text-xs font-mono text-white"
                       />
                       <button
-                        type="submit"
+                        type="button"
+                        onClick={handleBindNip55}
                         disabled={!nip55PubkeyInput.trim()}
                         className="min-h-[36px] px-2.5 py-1.5 rounded-md bg-[#1A1A1A] border border-white/15 hover:border-white/40 disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap shrink-0"
                       >
                         Bind
                       </button>
-                    </form>
+                    </div>
                   </div>
 
                   {/* NIP-46 Remote Signer (Same-Phone Copy URI + QR + Bunker) */}
@@ -777,22 +833,29 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                       </div>
                     )}
 
-                    <form onSubmit={(e) => void handleConnectBunker(e)} className="flex gap-1.5">
+                    <div className="flex gap-1.5">
                       <input
                         type="text"
                         value={bunkerInput}
                         onChange={(e) => setBunkerInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            void handleConnectBunker();
+                          }
+                        }}
                         placeholder="bunker://pubkey?relay=wss://..."
                         className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[#111111] border border-white/15 text-xs font-mono text-white"
                       />
                       <button
-                        type="submit"
+                        type="button"
+                        onClick={() => void handleConnectBunker()}
                         disabled={busyAction === 'bunker' || !bunkerInput.trim()}
                         className="min-h-[36px] px-2.5 py-1.5 rounded-md bg-[#1A1A1A] border border-white/15 hover:border-white/40 disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap shrink-0"
                       >
                         {busyAction === 'bunker' ? '…' : 'Connect'}
                       </button>
-                    </form>
+                    </div>
                   </div>
 
                   {/* NIP-07 Extension */}
@@ -818,22 +881,29 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                   {/* Secret Key Import */}
                   <div className="rounded-lg bg-black border border-white/10 p-3 space-y-2">
                     <div className="text-xs font-semibold text-white">Secret Key (nsec)</div>
-                    <form onSubmit={handleImportNsec} className="flex gap-1.5">
+                    <div className="flex gap-1.5">
                       <input
                         type="password"
                         value={nsecImportInput}
                         onChange={(e) => setNsecImportInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleImportNsec();
+                          }
+                        }}
                         placeholder="nsec1…"
                         className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[#111111] border border-white/15 text-xs font-mono text-white"
                       />
                       <button
-                        type="submit"
+                        type="button"
+                        onClick={handleImportNsec}
                         disabled={!nsecImportInput.trim()}
                         className="min-h-[36px] px-2.5 py-1.5 rounded-md bg-[#1A1A1A] border border-white/15 hover:border-white/40 disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap shrink-0"
                       >
                         Import
                       </button>
-                    </form>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -961,7 +1031,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
         )}
       </div>
 
-      {/* ACCORDION 2: RELAYS */}
+      {/* ACCORDION 2: RELAYS (AUTO-PROBE DISCOVERY + MANUAL OVERRIDE) */}
       <div className="rounded-xl bg-[#111111] border border-white/10 overflow-hidden">
         <button
           type="button"
@@ -974,7 +1044,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
           </span>
           <div className="flex items-center gap-2">
             <span className="text-xs font-mono tabular-nums text-[#B8B8B8]">
-              {relays.length} active
+              {relays.length} active · {settings.autoManageRelays !== false ? 'Auto' : 'Manual'}
             </span>
             <ChevronDown
               className={`w-4 h-4 text-[#B8B8B8] shrink-0 transition-transform duration-150 ${
@@ -985,46 +1055,124 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
         </button>
 
         {openPanel === 'relays' && (
-          <div className="px-4 pb-4 pt-3 border-t border-white/10 space-y-2.5">
-            <form onSubmit={handleAddRelay} className="flex gap-2">
-              <input
-                type="text"
-                value={newRelayInput}
-                onChange={(e) => setNewRelayInput(e.target.value)}
-                placeholder="wss://relay.nostr.band"
-                className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-black border border-white/15 text-xs font-mono text-white"
-              />
-              <button
-                type="submit"
-                className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] text-xs font-semibold text-white flex items-center gap-1 whitespace-nowrap shrink-0"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add</span>
-              </button>
-            </form>
+          <div className="px-4 pb-4 pt-3 border-t border-white/10 space-y-3">
+            <div className="p-3 rounded-lg bg-black border border-white/10 flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0 space-y-0.5">
+                <div className="text-xs font-semibold text-white">
+                  Automatic Public Relay Discovery &amp; Health Pruning
+                </div>
+                <p className="text-[11px] text-[#B8B8B8]">
+                  Probes free public relays on startup for WebSocket reachability and event kinds (<code className="font-mono text-white">30030</code>, <code className="font-mono text-white">10030</code>, <code className="font-mono text-white">30078</code>), prioritizing <code className="font-mono text-[#00F0FF]">wss://relay.primal.net</code> and dropping unresponsive or paid relays. Toggle OFF to configure custom relays manually.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={busyAction === 'scan_relays' || coordinator.probingRelays}
+                  onClick={() => void handleScanRelaysNow()}
+                  className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#111111] border border-white/15 hover:border-[#00F0FF] disabled:opacity-50 text-xs font-semibold text-white inline-flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 text-[#00F0FF] ${
+                      busyAction === 'scan_relays' || coordinator.probingRelays
+                        ? 'animate-spin'
+                        : ''
+                    }`}
+                  />
+                  <span>
+                    {busyAction === 'scan_relays' || coordinator.probingRelays
+                      ? 'Scanning…'
+                      : 'Scan Relays'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={settings.autoManageRelays !== false}
+                  onClick={() =>
+                    handleToggleAutoManageRelays(settings.autoManageRelays === false)
+                  }
+                  className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#111111] border border-white/15 hover:border-[#FF1493] text-xs font-mono font-semibold flex items-center gap-2 shrink-0"
+                >
+                  <span className="text-white">Auto-Manage</span>
+                  <span
+                    className={
+                      settings.autoManageRelays !== false
+                        ? 'text-[#FF1493]'
+                        : 'text-[#5E5E5E]'
+                    }
+                  >
+                    {settings.autoManageRelays !== false ? 'ON' : 'OFF'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {settings.autoManageRelays === false && (
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newRelayInput}
+                  onChange={(e) => setNewRelayInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddRelay();
+                    }
+                  }}
+                  placeholder="wss://relay.primal.net"
+                  className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-black border border-white/15 text-xs font-mono text-white"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddRelay}
+                  className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] text-xs font-semibold text-white flex items-center gap-1 whitespace-nowrap shrink-0"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Add Relay</span>
+                </button>
+              </div>
+            )}
 
             <div className="divide-y divide-white/10 rounded-lg bg-black border border-white/10">
               {relays.map((url) => {
                 const reach = coordinator.relayReachability.get(url) ?? 'idle';
+                const probe = coordinator.relayHealth.get(url);
                 return (
                   <div
                     key={url}
                     className="px-3 py-2.5 flex items-center justify-between gap-2 text-xs"
                   >
-                    <div className="min-w-0 flex items-center gap-2">
+                    <div className="min-w-0 flex flex-wrap items-center gap-2">
                       <span className="font-mono text-white truncate">{url}</span>
-                      <span className="text-[11px] text-[#B8B8B8] shrink-0">
-                        {reach === 'ok' ? '· OK' : reach === 'error' ? '· Timeout' : ''}
+                      <span
+                        className={`text-[11px] font-mono shrink-0 ${
+                          reach === 'ok'
+                            ? 'text-emerald-400'
+                            : reach === 'error'
+                              ? 'text-amber-400'
+                              : 'text-[#B8B8B8]'
+                        }`}
+                      >
+                        {reach === 'ok'
+                          ? `· Online${probe?.latencyMs ? ` (${probe.latencyMs}ms)` : ''}`
+                          : reach === 'error'
+                            ? '· Unreachable'
+                            : '· Ready'}
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveRelay(url)}
-                      aria-label={`Remove ${url}`}
-                      className="min-h-[34px] min-w-[34px] flex items-center justify-center text-[#B8B8B8] hover:text-white shrink-0"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    {settings.autoManageRelays === false && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveRelay(url)}
+                        aria-label={`Remove ${url}`}
+                        className="min-h-[34px] min-w-[34px] flex items-center justify-center text-[#B8B8B8] hover:text-white shrink-0"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -1159,30 +1307,35 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                       )}
                     </div>
 
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        if (!banHashInput.trim()) return;
-                        onReportAndBanEmojiHash({ emojiHash: banHashInput.trim() });
-                        setBanHashInput('');
-                      }}
-                      className="flex gap-2"
-                    >
+                    <div className="flex gap-2">
                       <input
                         type="text"
                         value={banHashInput}
                         onChange={(e) => setBanHashInput(e.target.value)}
-                        placeholder="64-char SHA-256 emoji hash (#… or sha256:…)"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (!banHashInput.trim()) return;
+                            onReportAndBanEmojiHash({ emojiHash: banHashInput.trim() });
+                            setBanHashInput('');
+                          }
+                        }}
+                        placeholder="64-char SHA-256 emoji hash (#… or https://…)"
                         className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-[#111111] border border-white/15 text-xs font-mono text-white"
                       />
                       <button
-                        type="submit"
+                        type="button"
                         disabled={!banHashInput.trim()}
+                        onClick={() => {
+                          if (!banHashInput.trim()) return;
+                          onReportAndBanEmojiHash({ emojiHash: banHashInput.trim() });
+                          setBanHashInput('');
+                        }}
                         className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap shrink-0"
                       >
                         Ban &amp; Report Hash
                       </button>
-                    </form>
+                    </div>
 
                     {allBannedHashes.length > 0 && (
                       <div className="divide-y divide-white/10 rounded-lg bg-[#111111] border border-white/10 max-h-40 overflow-y-auto">
@@ -1269,30 +1422,35 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                       )}
                     </div>
 
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        if (!banNpubInput.trim()) return;
-                        onReportAndBanAuthor({ pubkeyOrNpub: banNpubInput.trim() });
-                        setBanNpubInput('');
-                      }}
-                      className="flex gap-2"
-                    >
+                    <div className="flex gap-2">
                       <input
                         type="text"
                         value={banNpubInput}
                         onChange={(e) => setBanNpubInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (!banNpubInput.trim()) return;
+                            onReportAndBanAuthor({ pubkeyOrNpub: banNpubInput.trim() });
+                            setBanNpubInput('');
+                          }
+                        }}
                         placeholder="npub1… or 64-char hex pubkey"
                         className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-[#111111] border border-white/15 text-xs font-mono text-white"
                       />
                       <button
-                        type="submit"
+                        type="button"
                         disabled={!banNpubInput.trim()}
+                        onClick={() => {
+                          if (!banNpubInput.trim()) return;
+                          onReportAndBanAuthor({ pubkeyOrNpub: banNpubInput.trim() });
+                          setBanNpubInput('');
+                        }}
                         className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap shrink-0"
                       >
                         Ban &amp; Report
                       </button>
-                    </form>
+                    </div>
 
                     {allBannedHex.length > 0 && (
                       <div className="divide-y divide-white/10 rounded-lg bg-[#111111] border border-white/10 max-h-40 overflow-y-auto">
@@ -1379,33 +1537,41 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                       )}
                     </div>
 
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        if (!safeNpubInput.trim()) return;
-                        onAddSafeAuthor({
-                          pubkeyOrNpub: safeNpubInput.trim(),
-                          publishNomination: true,
-                        });
-                        setSafeNpubInput('');
-                      }}
-                      className="flex gap-2"
-                    >
+                    <div className="flex gap-2">
                       <input
                         type="text"
                         value={safeNpubInput}
                         onChange={(e) => setSafeNpubInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (!safeNpubInput.trim()) return;
+                            onAddSafeAuthor({
+                              pubkeyOrNpub: safeNpubInput.trim(),
+                              publishNomination: true,
+                            });
+                            setSafeNpubInput('');
+                          }
+                        }}
                         placeholder="npub1… or 64-char hex pubkey"
                         className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-[#111111] border border-white/15 text-xs font-mono text-white"
                       />
                       <button
-                        type="submit"
+                        type="button"
                         disabled={!safeNpubInput.trim()}
+                        onClick={() => {
+                          if (!safeNpubInput.trim()) return;
+                          onAddSafeAuthor({
+                            pubkeyOrNpub: safeNpubInput.trim(),
+                            publishNomination: true,
+                          });
+                          setSafeNpubInput('');
+                        }}
                         className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#1A1A1A] border border-[#00F0FF]/40 hover:border-[#00F0FF] disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap shrink-0"
                       >
                         Add Safe npub
                       </button>
-                    </form>
+                    </div>
 
                     {allSafeHex.length > 0 && (
                       <div className="divide-y divide-white/10 rounded-lg bg-[#111111] border border-white/10 max-h-40 overflow-y-auto">
@@ -1454,6 +1620,35 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                       </div>
                     )}
                   </div>
+
+                  {/* Curator Blocklist JSON Importer (`moji-curator-blocklist/v1`) */}
+                  {onImportCuratorBlocklist && (
+                    <div className="p-3 rounded-lg bg-black border border-white/10 space-y-2">
+                      <div className="text-xs font-semibold text-white">
+                        Import Curator Blocklist JSON (moji-curator-blocklist/v1)
+                      </div>
+                      <p className="text-[11px] text-[#B8B8B8]">
+                        Paste a <code className="font-mono text-white">moji-curator-blocklist/v1</code> JSON payload to batch-import <code className="font-mono text-white">blockedPublishers</code> and hash-ban <code className="font-mono text-white">blocked[].url</code> entries on your device.
+                      </p>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <textarea
+                          rows={2}
+                          value={curatorJsonInput}
+                          onChange={(e) => setCuratorJsonInput(e.target.value)}
+                          placeholder='{"format":"moji-curator-blocklist/v1","blocked":[...],"blockedPublishers":[...]}'
+                          className="flex-1 min-w-0 px-3 py-1.5 rounded-lg bg-[#111111] border border-white/15 text-xs font-mono text-white"
+                        />
+                        <button
+                          type="button"
+                          disabled={!curatorJsonInput.trim()}
+                          onClick={handleImportCuratorJson}
+                          className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-[#FF1493] hover:bg-[#CD0D72] disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap shrink-0 self-end sm:self-stretch"
+                        >
+                          Import Blocklist
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Published Relay Reports (`kind:30078 #t:mojisurvivor-mod`) — Audit Queue */}
                   <div className="p-3 rounded-lg bg-black border border-white/10 space-y-2.5">

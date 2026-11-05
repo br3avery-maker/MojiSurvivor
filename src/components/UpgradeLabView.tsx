@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Check, AlertCircle, ArrowRight } from 'lucide-react';
+import { Check, AlertCircle, ArrowRight, Sparkles, Flame } from 'lucide-react';
 import {
+  computeTotalUpgradeLevels,
   getUpgradeCost,
   UPGRADE_SPECS,
   type UpgradeLevels,
@@ -14,13 +15,21 @@ export interface UpgradePurchaseResult {
   error?: string;
 }
 
+export interface CareerRebirthResult {
+  ok: boolean;
+  newRebirthCount: number;
+  error?: string;
+}
+
 interface UpgradeLabViewProps {
   mojoBalance: number;
   playerLevel: number;
   playerXp: number;
   playerXpNext: number;
+  rebirthCount?: number;
   upgrades: UpgradeLevels;
   onPurchaseUpgrade: (spec: UpgradeSpec) => UpgradePurchaseResult;
+  onPerformRebirth?: () => CareerRebirthResult;
 }
 
 export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
@@ -28,14 +37,20 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
   playerLevel,
   playerXp,
   playerXpNext,
+  rebirthCount = 0,
   upgrades,
   onPurchaseUpgrade,
+  onPerformRebirth,
 }) => {
   const [feedback, setFeedback] = useState<{
     type: 'success' | 'error';
     message: string;
     key?: string;
   } | null>(null);
+  const [confirmRebirth, setConfirmRebirth] = useState(false);
+
+  const totalUpgradeLevels = computeTotalUpgradeLevels(upgrades);
+  const canRebirth = playerLevel >= 20 || totalUpgradeLevels >= 15;
 
   const handleBuy = (spec: UpgradeSpec) => {
     const res = onPurchaseUpgrade(spec);
@@ -54,6 +69,27 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
     }
   };
 
+  const handleRebirthClick = () => {
+    if (!onPerformRebirth) return;
+    if (!confirmRebirth) {
+      setConfirmRebirth(true);
+      return;
+    }
+    const res = onPerformRebirth();
+    setConfirmRebirth(false);
+    if (res.ok) {
+      setFeedback({
+        type: 'success',
+        message: `Career Rebirth Tier ${res.newRebirthCount} unlocked! Permanent +${res.newRebirthCount * 15}% DMG, +${res.newRebirthCount * 12}% Mojo Bounty, +${res.newRebirthCount * 10}% Max Hull, and +${res.newRebirthCount * 6}% Haste active.`,
+      });
+    } else {
+      setFeedback({
+        type: 'error',
+        message: res.error ?? 'Requirements not met for Career Rebirth.',
+      });
+    }
+  };
+
   return (
     <section className="max-w-5xl mx-auto px-4 py-4 space-y-3.5">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#9A0957]/45">
@@ -66,6 +102,12 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-4 font-mono tabular-nums text-sm">
+          {rebirthCount > 0 && (
+            <div>
+              <span className="text-xs text-[#B8B8B8]">Rebirth: </span>
+              <span className="font-bold text-[#00F0FF]">Tier {rebirthCount}</span>
+            </div>
+          )}
           <div>
             <span className="text-xs text-[#B8B8B8]">Player Lv: </span>
             <span className="font-bold text-[#FFB6D9]">Lv.{playerLevel}</span>
@@ -108,6 +150,79 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
           </button>
         </div>
       )}
+
+      {/* Career Rebirth Prestige Panel */}
+      <div className="p-4 rounded-xl bg-[#111111] border border-[#00F0FF]/40 flex flex-col md:flex-row md:items-center justify-between gap-3.5">
+        <div className="space-y-1.5 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 text-sm font-display font-bold text-white">
+              <Flame className="w-4 h-4 text-[#00F0FF]" />
+              <span>Career Rebirth Prestige</span>
+            </span>
+            <span className="text-xs font-mono font-semibold text-[#00F0FF] tabular-nums">
+              · Tier {rebirthCount} Active
+            </span>
+          </div>
+          <p className="text-xs text-[#B8B8B8] leading-relaxed">
+            Reset your 5 Upgrade Lab tracks to Lv.0 at{' '}
+            <span className="text-white font-semibold">Career Player Lv.20+</span> (or{' '}
+            <span className="text-white font-semibold">15+ total upgrade levels</span>, currently{' '}
+            <span className="font-mono text-[#FFB6D9]">{totalUpgradeLevels}/25</span>) in exchange for a permanent, stackable{' '}
+            <span className="text-[#00F0FF] font-semibold">Rebirth Tier</span>. Your unspent Mojo, Career Player Level, and Codex unlocks are preserved.
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono tabular-nums text-[#C0C0C0] pt-0.5">
+            <span>
+              Next Tier ({rebirthCount + 1}):{' '}
+              <strong className="text-[#FF1493]">+{(rebirthCount + 1) * 15}% Spell DMG</strong>
+            </span>
+            <span>·</span>
+            <span>
+              <strong className="text-[#FFD700]">+{(rebirthCount + 1) * 12}% Mojo Bounty</strong>
+            </span>
+            <span>·</span>
+            <span>
+              <strong className="text-[#00F0FF]">+{(rebirthCount + 1) * 10}% Max Hull</strong>
+            </span>
+            <span>·</span>
+            <span>
+              <strong className="text-[#FFB6D9]">+{(rebirthCount + 1) * 6}% Fire Haste</strong>
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {confirmRebirth && (
+            <button
+              type="button"
+              onClick={() => setConfirmRebirth(false)}
+              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-black border border-white/15 text-xs font-mono text-[#B8B8B8] hover:text-white"
+            >
+              Cancel
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={!canRebirth}
+            onClick={handleRebirthClick}
+            className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-mono font-semibold transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
+              canRebirth
+                ? confirmRebirth
+                  ? 'bg-[#00F0FF] text-black hover:bg-[#66F7FF] cursor-pointer'
+                  : 'bg-[#1A1A1A] border border-[#00F0FF] text-[#00F0FF] hover:bg-[#00F0FF]/15 cursor-pointer'
+                : 'bg-black border border-white/10 text-[#5E5E5E] cursor-not-allowed'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>
+              {!canRebirth
+                ? `Locked (Need Lv.20 or 15 Upgr)`
+                : confirmRebirth
+                  ? `Confirm Rebirth → Tier ${rebirthCount + 1}`
+                  : `Ascend to Rebirth Tier ${rebirthCount + 1}`}
+            </span>
+          </button>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {UPGRADE_SPECS.map((spec) => {

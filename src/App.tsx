@@ -10,6 +10,7 @@ import {
 import { LeaderboardView } from './components/LeaderboardView';
 import {
   UpgradeLabView,
+  type CareerRebirthResult,
   type UpgradePurchaseResult,
 } from './components/UpgradeLabView';
 import { sha256Hex, type EmojiCombatTrait } from './lib/cryptoStats';
@@ -20,6 +21,7 @@ import type {
 import {
   normalizeEmojiHash,
   normalizePubkeyOrNpub,
+  parseCuratorBlocklistJson,
   type EmojiFilterMode,
 } from './lib/moderationLists';
 import { formatShortNpub, MojiNostrCoordinator } from './lib/nostrEngine';
@@ -34,6 +36,7 @@ import {
   loadActiveRunCheckpoint,
   loadPendingPostRunSession,
   loadPersistedStateWithDiagnostics,
+  performCareerRebirth,
   reconcileProgressionStates,
   saveActiveRunCheckpoint,
   savePendingPostRunSession,
@@ -67,6 +70,24 @@ export default function App() {
         nsfwBanEmojiHashes: initialBoot.state.nsfwBanEmojiHashes,
         safePackAuthors: initialBoot.state.safePackAuthors,
         blockedEmojiKeys: initialBoot.state.blockedEmojiKeys,
+        autoManageRelays: initialBoot.state.settings.autoManageRelays !== false,
+        onAutoRelaysUpdated: (healthyRelays) => {
+          const prev = persistedRef.current;
+          if (
+            prev.relays.length === healthyRelays.length &&
+            prev.relays.every((r, idx) => r === healthyRelays[idx])
+          ) {
+            return;
+          }
+          const next = {
+            ...prev,
+            relays: healthyRelays,
+            updatedAt: Date.now(),
+          };
+          persistedRef.current = next;
+          setPersisted(next);
+          savePersistedState(next);
+        },
       })
   );
   const [nostrTick, setNostrTick] = useState(0);
@@ -608,6 +629,7 @@ export default function App() {
             mojoEarnedTotal: summary.mojoEarned,
             careerXpEarnedTotal: summary.careerXpEarned,
             killsTotal: summary.defeated,
+            bossesDefeatedTotal: summary.bossesDefeated,
             waveReached: summary.wave,
             scoreReached: summary.score,
             completed: true,
@@ -755,6 +777,28 @@ export default function App() {
     [commitPersisted, coordinator.signerMode, syncProgressSnapshotToRelays]
   );
 
+  const handlePerformRebirth = useCallback((): CareerRebirthResult => {
+    const current = persistedRef.current;
+    const res = performCareerRebirth(current);
+    if (!res.ok) {
+      return {
+        ok: false,
+        newRebirthCount: current.rebirthCount ?? 0,
+        error: res.error,
+      };
+    }
+
+    const updatedState = commitPersisted(() => res.nextState, { immediate: true });
+    if (updatedState.progressSync.enabled && coordinator.signerMode !== 'nip55') {
+      void syncProgressSnapshotToRelays();
+    }
+
+    return {
+      ok: true,
+      newRebirthCount: res.newRebirthCount,
+    };
+  }, [commitPersisted, coordinator.signerMode, syncProgressSnapshotToRelays]);
+
   const handleToggleProgressSync = useCallback(
     (enabled: boolean) => {
       commitPersisted(
@@ -810,9 +854,10 @@ export default function App() {
 
   const handleUpdateSettings = useCallback(
     (settings: GameSettings) => {
+      coordinator.setAutoManageRelays(settings.autoManageRelays !== false);
       commitPersisted((prev) => ({ ...prev, settings }), { immediate: true });
     },
-    [commitPersisted]
+    [commitPersisted, coordinator]
   );
 
   const handleAcceptContentWarning = useCallback(
@@ -1090,6 +1135,81 @@ export default function App() {
     [commitPersisted]
   );
 
+  const handleImportCuratorBlocklist = useCallback(
+    (
+      rawJson: string
+    ): {
+      ok: boolean;
+      addedPubkeys: number;
+      addedHashes: number;
+      error?: string;
+    } => {
+      const parsed = parseCuratorBlocklistJson(rawJson);
+      if (!parsed.ok || (parsed.pubkeys.length === 0 && parsed.emojiHashes.length === 0)) {
+        return {
+          ok: false,
+          addedPubkeys: 0,
+          addedHashes: 0,
+          error:
+            parsed.error ??
+            'No valid publisher hex pubkeys or emoji URLs/hashes found in JSON payload.',
+        };
+      }
+
+      let addedPubs = 0;
+      let addedHashes = 0;
+      commitPersisted(
+        (prev) => {
+          const prevPubSet = new Set(prev.nsfwBanPubkeys);
+          const prevHashSet = new Set(prev.nsfwBanEmojiHashes);
+          for (const pub of parsed.pubkeys) {
+            if (!prevPubSet.has(pub)) {
+              prevPubSet.add(pub);
+              addedPubs += 1;
+            }
+          }
+          for (const h of parsed.emojiHashes) {
+            if (!prevHashSet.has(h)) {
+              prevHashSet.add(h);
+              addedHashes += 1;
+            }
+          }
+          const nextPubs = Array.from(prevPubSet);
+          const nextHashes = Array.from(prevHashSet);
+          const nextSafe = prev.safePackAuthors.filter((p) => !prevPubSet.has(p));
+
+          const nextCodex: typeof prev.codex = {};
+          for (const [k, rec] of Object.entries(prev.codex)) {
+            if (
+              (rec.packAuthor && prevPubSet.has(rec.packAuthor.toLowerCase())) ||
+              (rec.hash && prevHashSet.has(rec.hash.toLowerCase()))
+            ) {
+              continue;
+            }
+            nextCodex[k] = rec;
+          }
+
+          return {
+            ...prev,
+            revision: prev.revision + 1,
+            nsfwBanPubkeys: nextPubs,
+            nsfwBanEmojiHashes: nextHashes,
+            safePackAuthors: nextSafe,
+            codex: nextCodex,
+          };
+        },
+        { immediate: true }
+      );
+
+      return {
+        ok: true,
+        addedPubkeys: addedPubs,
+        addedHashes,
+      };
+    },
+    [commitPersisted]
+  );
+
   const handleChangeCodexViewMode = useCallback(
     (codexViewMode: CodexViewMode) => {
       commitPersisted(
@@ -1220,6 +1340,7 @@ export default function App() {
         playerLevel={persisted.playerLevel}
         playerXp={persisted.playerXp}
         playerXpNext={persisted.playerXpNext}
+        rebirthCount={persisted.rebirthCount}
         upgrades={persisted.upgrades}
         settings={persisted.settings}
         defaultAvatarUrl={defaultAvatarUrl}
@@ -1493,6 +1614,11 @@ export default function App() {
                 <div className="text-xs text-[#B8B8B8] truncate">Player Level</div>
                 <div className="text-sm sm:text-lg font-bold text-[#FF1493]">
                   Lv.{persisted.playerLevel}
+                  {(persisted.rebirthCount ?? 0) > 0 && (
+                    <span className="text-xs font-semibold text-[#00F0FF]">
+                      {' '}· R{persisted.rebirthCount}
+                    </span>
+                  )}
                   <span className="text-xs font-normal text-[#5E5E5E]">
                     {' '}({persisted.playerXp}/{persisted.playerXpNext})
                   </span>
@@ -1627,8 +1753,10 @@ export default function App() {
             playerLevel={persisted.playerLevel}
             playerXp={persisted.playerXp}
             playerXpNext={persisted.playerXpNext}
+            rebirthCount={persisted.rebirthCount}
             upgrades={persisted.upgrades}
             onPurchaseUpgrade={handlePurchaseUpgrade}
+            onPerformRebirth={handlePerformRebirth}
           />
         )}
 
@@ -1664,6 +1792,16 @@ export default function App() {
             localReceipts={persisted.localReceipts}
             currentPubkey={coordinator.pubkey}
             playerLevel={persisted.playerLevel}
+            careerStats={{
+              lifetimeScore: persisted.lifetimeScore ?? persisted.highScore,
+              highScore: persisted.highScore,
+              bestWave: persisted.bestWave,
+              totalRuns: persisted.totalRuns,
+              totalKills: persisted.totalKills,
+              totalBossKills: persisted.totalBossKills ?? 0,
+              lifetimeMojoEarned: persisted.lifetimeMojoEarned,
+              rebirthCount: persisted.rebirthCount ?? 0,
+            }}
             defaultAvatarUrl={defaultAvatarUrl}
             relayCount={persisted.relays.length}
             syncing={coordinator.syncingLeaderboard}
@@ -1707,6 +1845,7 @@ export default function App() {
             onUnbanEmojiHash={handleUnbanEmojiHash}
             onAddSafeAuthor={handleAddSafeAuthor}
             onRemoveSafeAuthor={handleRemoveSafeAuthor}
+            onImportCuratorBlocklist={handleImportCuratorBlocklist}
             onRefreshModerationReports={async () => {
               await coordinator.syncModerationReports();
             }}

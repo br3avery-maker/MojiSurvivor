@@ -82,6 +82,7 @@ export interface RunProgressCheckpointPayload {
   mojoEarnedTotal: number;
   careerXpEarnedTotal: number;
   killsTotal: number;
+  bossesDefeatedTotal?: number;
   waveReached: number;
   scoreReached: number;
   completed: boolean;
@@ -294,6 +295,8 @@ export class MojiSurvivorEngine {
   private upgrades: UpgradeLevels;
   private settings: GameSettings;
   private careerPlayerLevel = 1;
+  private rebirthCount = 0;
+  private rebirthMojoMultiplier = 1;
 
   private arenaWidth = 1800;
   private arenaHeight = 1800;
@@ -390,7 +393,8 @@ export class MojiSurvivorEngine {
     settings: GameSettings,
     callbacks: GameEngineCallbacks,
     initialCheckpoint?: ActiveRunCheckpoint | null,
-    careerPlayerLevel = 1
+    careerPlayerLevel = 1,
+    rebirthCount = 0
   ) {
     this.canvas = canvas;
     const context = canvas.getContext('2d', { alpha: false });
@@ -402,6 +406,8 @@ export class MojiSurvivorEngine {
     this.settings = settings;
     this.callbacks = callbacks;
     this.careerPlayerLevel = Math.max(1, careerPlayerLevel);
+    this.rebirthCount = Math.max(0, Math.floor(rebirthCount));
+    this.rebirthMojoMultiplier = 1 + this.rebirthCount * 0.12;
 
     this.initSpriteLayer();
     this.initRunState(initialCheckpoint);
@@ -440,7 +446,12 @@ export class MojiSurvivorEngine {
 
   private initRunState(checkpoint?: ActiveRunCheckpoint | null): void {
     const careerBonusLv = Math.max(0, this.careerPlayerLevel - 1);
-    const maxHp = 100 + this.upgrades.defense * 22 + careerBonusLv * 4;
+    const rebirthHullMult = 1 + this.rebirthCount * 0.1;
+    const rebirthDmgMult = 1 + this.rebirthCount * 0.15;
+    const rebirthHasteBonus = this.rebirthCount * 0.06;
+    const maxHp = Math.round(
+      (100 + this.upgrades.defense * 22 + careerBonusLv * 4) * rebirthHullMult
+    );
     const restoredWeapons: ActiveWeapon[] =
       checkpoint && Array.isArray(checkpoint.weapons) && checkpoint.weapons.length > 0
         ? checkpoint.weapons.map((w) => {
@@ -471,12 +482,14 @@ export class MojiSurvivorEngine {
       radius: 20,
       hp: checkpoint ? Math.max(25, Math.min(maxHp, checkpoint.playerHp)) : maxHp,
       maxHp,
-      armorReduction: Math.min(0.38, this.upgrades.defense * 0.045 + careerBonusLv * 0.006),
+      armorReduction: Math.min(0.42, this.upgrades.defense * 0.045 + careerBonusLv * 0.006),
       baseSpeed: 232 * (1 + this.upgrades.speed * 0.06 + Math.min(0.18, careerBonusLv * 0.006)),
       regenPerSec: 0.35 + this.upgrades.regen * 0.55 + careerBonusLv * 0.08,
       pickupRadius: 86 + this.upgrades.magnet * 22 + careerBonusLv * 1.5,
-      damageMultiplier: 1 + this.upgrades.attack * 0.16 + careerBonusLv * 0.035,
-      fireRateHaste: 1 + Math.min(0.28, careerBonusLv * 0.012),
+      damageMultiplier:
+        (1 + this.upgrades.attack * 0.16 + careerBonusLv * 0.035) * rebirthDmgMult,
+      fireRateHaste:
+        1 + Math.min(0.28, careerBonusLv * 0.012) + Math.min(0.36, rebirthHasteBonus),
       level: checkpoint ? Math.max(1, checkpoint.spellLevel) : 1,
       exp: checkpoint ? Math.max(0, checkpoint.spellExp) : 0,
       expNext: checkpoint ? Math.max(18, checkpoint.spellExpNext) : 18,
@@ -669,6 +682,7 @@ export class MojiSurvivorEngine {
       mojoEarnedTotal: this.mojoEarned,
       careerXpEarnedTotal: this.careerXpEarned,
       killsTotal: this.defeated,
+      bossesDefeatedTotal: this.bossesDefeated,
       waveReached: this.wave,
       scoreReached: this.score,
       completed,
@@ -1473,8 +1487,9 @@ export class MojiSurvivorEngine {
         if (orb.kind === 'exp') {
           this.grantExp(orb.value);
         } else {
-          this.mojoEarned += orb.value;
-          this.score += orb.value * 15;
+          const boostedMojo = Math.max(1, Math.round(orb.value * this.rebirthMojoMultiplier));
+          this.mojoEarned += boostedMojo;
+          this.score += boostedMojo * 15;
           retroAudio.playPickup();
         }
       }
@@ -1621,10 +1636,11 @@ export class MojiSurvivorEngine {
       if (this.activeBoss?.uid === enemy.uid) {
         this.activeBoss = null;
         this.bossesDefeated += 1;
-        this.mojoEarned += 25;
+        const bossMojo = Math.round(25 * this.rebirthMojoMultiplier);
+        this.mojoEarned += bossMojo;
         this.careerXpEarned += 75;
         this.score += 1200;
-        this.callbacks.onBannerToast('Apex Boss Defeated · +25 Mojo');
+        this.callbacks.onBannerToast(`Apex Boss Defeated · +${bossMojo} Mojo`);
       }
 
       this.defeated += 1;

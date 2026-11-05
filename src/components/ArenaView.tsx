@@ -36,6 +36,7 @@ interface ArenaViewProps {
   playerLevel: number;
   playerXp: number;
   playerXpNext: number;
+  rebirthCount?: number;
   upgrades: UpgradeLevels;
   settings: GameSettings;
   defaultAvatarUrl: string;
@@ -75,6 +76,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
   coordinator,
   profile,
   playerLevel,
+  rebirthCount = 0,
   upgrades,
   settings,
   defaultAvatarUrl,
@@ -213,7 +215,8 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
         },
       },
       checkpointToLoad,
-      playerLevel
+      playerLevel,
+      rebirthCount
     );
 
     engineRef.current = engine;

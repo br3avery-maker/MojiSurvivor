@@ -9,6 +9,19 @@ import {
 import type { RunReceiptRecord } from '../lib/storage';
 import { ScoreCardPanel } from './ScoreCardPanel';
 
+export interface CareerLifetimeTotals {
+  lifetimeScore: number;
+  highScore: number;
+  bestWave: number;
+  totalRuns: number;
+  totalKills: number;
+  totalBossKills: number;
+  lifetimeMojoEarned: number;
+  rebirthCount: number;
+}
+
+export type LeaderboardSortMode = 'score' | 'wave' | 'defeated' | 'bosses';
+
 interface LeaderboardViewProps {
   coordinator: MojiNostrCoordinator;
   entries: VerifiedLeaderboardEntry[];
@@ -17,6 +30,7 @@ interface LeaderboardViewProps {
   localReceipts: RunReceiptRecord[];
   currentPubkey: string;
   playerLevel: number;
+  careerStats?: CareerLifetimeTotals;
   defaultAvatarUrl: string;
   relayCount: number;
   syncing: boolean;
@@ -61,6 +75,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   localReceipts,
   currentPubkey,
   playerLevel,
+  careerStats,
   defaultAvatarUrl,
   relayCount,
   syncing,
@@ -70,11 +85,29 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   onDeleteReceipt,
 }) => {
   const [tab, setTab] = useState<'global' | 'local'>('global');
+  const [sortMode, setSortMode] = useState<LeaderboardSortMode>('score');
   const [inspectedEventId, setInspectedEventId] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [scoreCardReceipt, setScoreCardReceipt] = useState<RunReceiptRecord | null>(null);
   const [nip55DrawerId, setNip55DrawerId] = useState<string | null>(null);
   const [nip55PasteInput, setNip55PasteInput] = useState('');
+
+  const sortedGlobalEntries = useMemo(() => {
+    const copy = [...entries];
+    copy.sort((a, b) => {
+      if (sortMode === 'wave') {
+        return b.wave - a.wave || b.score - a.score;
+      }
+      if (sortMode === 'defeated') {
+        return b.defeated - a.defeated || b.score - a.score;
+      }
+      if (sortMode === 'bosses') {
+        return b.bosses - a.bosses || b.score - a.score;
+      }
+      return b.score - a.score || b.wave - a.wave;
+    });
+    return copy;
+  }, [entries, sortMode]);
 
   const combinedMyRuns = useMemo(() => {
     const seenEventIds = new Set<string>();
@@ -174,7 +207,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         <div className="min-w-0 space-y-0.5">
           <div className="w-7 h-1 rounded-full bg-[#FF1493] mb-1" />
           <h1 className="text-lg sm:text-xl font-display font-bold text-white tracking-tight">
-            Relay Leaderboard
+            Relay Leaderboard &amp; Career Totals
           </h1>
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#B8B8B8]">
             <span>Personal best per pubkey</span>
@@ -196,26 +229,100 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         </button>
       </div>
 
-      {/* Segmented View Switch */}
-      <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#111111] border border-[#9A0957]/55">
-        <button
-          type="button"
-          onClick={() => setTab('global')}
-          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-            tab === 'global' ? 'bg-[#FF1493] text-white' : 'text-[#B8B8B8] hover:text-white'
-          }`}
-        >
-          Global Verified ({entries.length})
-        </button>
-        <button
-          type="button"
-          onClick={() => setTab('local')}
-          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-            tab === 'local' ? 'bg-[#FF1493] text-white' : 'text-[#B8B8B8] hover:text-white'
-          }`}
-        >
-          My Receipts ({totalMyRuns})
-        </button>
+      {/* Career Lifetime Totals Strip */}
+      {careerStats && (
+        <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5 p-3 rounded-xl bg-[#111111] border border-[#9A0957]/45 font-mono tabular-nums">
+          <div>
+            <div className="text-[11px] text-[#B8B8B8] truncate">Lifetime Score</div>
+            <div className="text-sm font-bold text-[#FF1493]">
+              {careerStats.lifetimeScore.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] text-[#B8B8B8] truncate">Total Runs</div>
+            <div className="text-sm font-bold text-white">
+              {careerStats.totalRuns.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] text-[#B8B8B8] truncate">Total Defeated</div>
+            <div className="text-sm font-bold text-[#FFB6D9]">
+              {careerStats.totalKills.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] text-[#B8B8B8] truncate">Apex Bosses</div>
+            <div className="text-sm font-bold text-[#00F0FF]">
+              {careerStats.totalBossKills.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] text-[#B8B8B8] truncate">Lifetime Mojo</div>
+            <div className="text-sm font-bold text-[#FFD700]">
+              {careerStats.lifetimeMojoEarned.toLocaleString()}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] text-[#B8B8B8] truncate">Rebirth Tier</div>
+            <div className="text-sm font-bold text-[#00F0FF]">
+              Tier {careerStats.rebirthCount}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Segmented View Switch & Sort Filter Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#111111] border border-[#9A0957]/55">
+          <button
+            type="button"
+            onClick={() => setTab('global')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              tab === 'global' ? 'bg-[#FF1493] text-white' : 'text-[#B8B8B8] hover:text-white'
+            }`}
+          >
+            Global Verified ({entries.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab('local')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              tab === 'local' ? 'bg-[#FF1493] text-white' : 'text-[#B8B8B8] hover:text-white'
+            }`}
+          >
+            My Receipts ({totalMyRuns})
+          </button>
+        </div>
+
+        {tab === 'global' && (
+          <div
+            role="group"
+            aria-label="Sort leaderboard rankings"
+            className="inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-[#111111] border border-white/10"
+          >
+            {(
+              [
+                ['score', 'Best Score'],
+                ['wave', 'Highest Wave'],
+                ['defeated', 'Most Defeated'],
+                ['bosses', 'Boss Slayers'],
+              ] as const satisfies readonly [LeaderboardSortMode, string][]
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setSortMode(key)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+                  sortMode === key
+                    ? 'bg-[#5B0633] text-white border border-[#FF1493]/60'
+                    : 'text-[#B8B8B8] hover:text-white'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {scoreCardReceipt && (
@@ -240,7 +347,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
       )}
 
       {tab === 'global' ? (
-        entries.length === 0 ? (
+        sortedGlobalEntries.length === 0 ? (
           <div className="py-10 px-4 text-center rounded-xl bg-[#111111] border border-white/10">
             <p className="text-xs text-white font-medium">
               {syncing
@@ -252,7 +359,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
           <>
             {/* Mobile Compact List */}
             <div className="md:hidden divide-y divide-[#5B0633]/70 rounded-xl bg-[#111111] border border-[#9A0957]/55 overflow-hidden">
-              {entries.slice(0, 50).map((entry, idx) => {
+              {sortedGlobalEntries.slice(0, 50).map((entry, idx) => {
                 const prof = profiles.get(entry.pubkey);
                 const isCurrentUser = entry.pubkey === currentPubkey;
                 const displayName =
@@ -286,6 +393,12 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                             <span>Wave {entry.wave}</span>
                             <span aria-hidden="true">·</span>
                             <span>{entry.defeated} kills</span>
+                            {entry.bosses > 0 && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="text-[#00F0FF]">{entry.bosses} boss</span>
+                              </>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -362,11 +475,12 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                     <th className="py-2.5 px-3.5 text-right">Best Score</th>
                     <th className="py-2.5 px-3.5 text-right">Wave</th>
                     <th className="py-2.5 px-3.5 text-right">Defeated</th>
+                    <th className="py-2.5 px-3.5 text-right">Bosses</th>
                     <th className="py-2.5 px-3.5">Schnorr Proof</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#5B0633]/60 text-xs font-mono tabular-nums">
-                  {entries.slice(0, 50).map((entry, idx) => {
+                  {sortedGlobalEntries.slice(0, 50).map((entry, idx) => {
                     const prof = profiles.get(entry.pubkey);
                     const isCurrentUser = entry.pubkey === currentPubkey;
                     const displayName =
@@ -408,6 +522,9 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                           <td className="py-2.5 px-3.5 text-right text-[#B8B8B8]">
                             {entry.defeated}
                           </td>
+                          <td className="py-2.5 px-3.5 text-right text-[#00F0FF]">
+                            {entry.bosses}
+                          </td>
                           <td className="py-2.5 px-3.5">
                             <button
                               type="button"
@@ -423,7 +540,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                         </tr>
                         {isExpanded && (
                           <tr className="bg-black/70">
-                            <td colSpan={6} className="p-3 space-y-2">
+                            <td colSpan={7} className="p-3 space-y-2">
                               <pre className="text-[11px] text-[#B8B8B8] overflow-x-auto max-h-44">
                                 {JSON.stringify(entry.rawEvent, null, 2)}
                               </pre>
@@ -601,6 +718,12 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                         type="text"
                         value={nip55PasteInput}
                         onChange={(e) => setNip55PasteInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            void handleApplyNip55Paste(rec);
+                          }
+                        }}
                         placeholder='Paste signed {"id":...,"sig":...} or 128-hex sig'
                         className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[#111111] border border-white/15 text-xs font-mono text-white"
                       />
@@ -610,7 +733,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                         onClick={() => void handleApplyNip55Paste(rec)}
                         className="min-h-[34px] px-3 py-1.5 rounded-md bg-[#1A1A1A] border border-white/20 text-xs font-semibold text-white whitespace-nowrap"
                       >
-                        Verify & Send
+                        Verify &amp; Send
                       </button>
                     </div>
                   </div>

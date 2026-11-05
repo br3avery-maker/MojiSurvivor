@@ -1,0 +1,38 @@
+{
+  "name": "MojiSurvivor — Nostr NIP-30 Arcade Survivor",
+  "short_name": "MojiSurvivor",
+  "description": "Retro-arcade Nostr survivor action game with live NIP-30 custom emoji discovery, BIP-340 Schnorr run receipts, and NIP-07, NIP-46, and NIP-55 signers.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#FF1493",
+  "icons": [
+    {
+      "src": "./assets/aistudio/moji_survivor_emblem_1793749794956-C7_7CmkR_406e3441.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    }
+  ],
+  "nostr_permissions": [
+    "getPublicKey",
+    "signEvent",
+    "relays"
+  ],
+  "nsite": {
+    "permissions": [
+      "nostr",
+      "relays",
+      "storage",
+      "clipboard-write"
+    ],
+    "kinds": [0, 1, 5, 10030, 30030, 30078],
+    "default_relays": [
+      "wss://relay.primal.net",
+      "wss://relay.nostr.band",
+      "wss://offchain.pub",
+      "wss://nostr.mom"
+    ]
+  }
+}

@@ -8,8 +8,13 @@ import {
   RESERVE_EMOJI_DEFS,
 } from '../src/lib/cryptoStats';
 import {
+  BUILT_IN_NSFW_BAN_NPUBS,
+  BUILT_IN_NSFW_EMOJI_HASHES,
+  getBuiltInBannedHashesSet,
+  getBuiltInBannedHexSet,
   normalizeEmojiHash,
   normalizePubkeyOrNpub,
+  parseCuratorBlocklistJson,
   pubkeyHexToNpub,
 } from '../src/lib/moderationLists';
 import {
@@ -28,6 +33,7 @@ import {
   loadActiveRunCheckpoint,
   loadPersistedStateWithDiagnostics,
   normalizeAndMigrateState,
+  performCareerRebirth,
   reconcileProgressionStates,
   saveActiveRunCheckpoint,
   savePersistedState,
@@ -997,5 +1003,93 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
       false,
       'Non-safe-listed stranger pack is excluded in Safe List Only mode'
     );
+  });
+
+  it('11. Enforces built-in moji-curator-blocklist/v1 NSFW publishers & URLs, strips dead/paid relays in auto mode, and supports Career Rebirth prestige without losing lifetime Mojo', () => {
+    // 11a. Built-in NSFW blocklist covers all 9 publisher pubkeys and 4 blocked URLs
+    const builtInPubs = getBuiltInBannedHexSet();
+    const builtInHashes = getBuiltInBannedHashesSet();
+    assert.equal(BUILT_IN_NSFW_BAN_NPUBS.length, 9);
+    assert.equal(builtInPubs.size, 9);
+    assert.equal(BUILT_IN_NSFW_EMOJI_HASHES.length, 4);
+    assert.equal(builtInHashes.size, 4);
+
+    assert.ok(
+      builtInPubs.has('1a21da9d5ae3dffdac19adf5e400394401f67f8da4113a1b7bdece35b0d99fe2')
+    );
+    assert.ok(
+      builtInHashes.has(
+        extractEmojiHash('https://cdn.discordapp.com/emojis/526833864975319060.gif')
+      )
+    );
+    assert.ok(
+      builtInHashes.has(
+        '74bcdbdfafbf4656cf10f91c55b080e736ddb0813ff664ae032c5b19264346eb'
+      ),
+      'Blossom 64-hex digest extracted directly from blocked URL'
+    );
+
+    // Verify parseCuratorBlocklistJson parses moji-curator-blocklist/v1 format
+    const sampleBlocklistJson = JSON.stringify({
+      format: 'moji-curator-blocklist/v1',
+      blocked: [
+        {
+          author: '983d5dae1d2280926cf90c037394dbda4348503f4cc342464df7fde98cabecdf',
+          url: 'https://cdn.discordapp.com/emojis/1011386162633527388.png',
+        },
+      ],
+      blockedPublishers: [
+        '626b275b16dec6db7a27e807c2db690e71b4d42d482f1817ab370601eeabb735',
+      ],
+    });
+    const parsedBlocklist = parseCuratorBlocklistJson(sampleBlocklistJson);
+    assert.equal(parsedBlocklist.ok, true);
+    assert.equal(parsedBlocklist.pubkeys.length, 2);
+    assert.equal(parsedBlocklist.emojiHashes.length, 1);
+
+    // 11b. Auto-manage relays strips deprecated/paid relays (damus, nostr.wine, nos.lol) and prioritizes relay.primal.net
+    const migratedState = normalizeAndMigrateState({
+      ...createDefaultState(),
+      relays: ['wss://relay.damus.io', 'wss://nostr.wine', 'wss://nos.lol'],
+      settings: {
+        ...createDefaultState().settings,
+        autoManageRelays: true,
+      },
+    })!;
+    assert.ok(
+      migratedState.relays.includes('wss://relay.primal.net'),
+      'Falls back to working default relays led by wss://relay.primal.net when only deprecated/paid relays were saved'
+    );
+    assert.ok(!migratedState.relays.includes('wss://relay.damus.io'));
+    assert.ok(!migratedState.relays.includes('wss://nostr.wine'));
+    assert.ok(!migratedState.relays.includes('wss://nos.lol'));
+
+    // 11c. Career Rebirth Prestige resets upgrades, increments rebirthCount, and preserves Mojo accounting across reconciles
+    let state = createDefaultState();
+    state = {
+      ...state,
+      playerLevel: 20,
+      mojoBalance: 200,
+      lifetimeMojoEarned: 288, // 200 balance + 88 spent on attack Lv.2 (25+38) & defense Lv.1 (25)
+      upgrades: { attack: 2, defense: 1, speed: 0, regen: 0, magnet: 0 },
+    };
+
+    const rebirthRes = performCareerRebirth(state);
+    assert.equal(rebirthRes.ok, true);
+    const rebirthed = rebirthRes.nextState;
+    assert.equal(rebirthed.rebirthCount, 1);
+    assert.equal(rebirthed.upgrades.attack, 0);
+    assert.equal(rebirthed.upgrades.defense, 0);
+    assert.equal(rebirthed.mojoSpentOnRebirths, 88);
+    assert.equal(
+      rebirthed.mojoBalance,
+      200,
+      'Unspent Mojo is preserved accurately without refunding spent upgrade Mojo'
+    );
+
+    const reconciledAfterRebirth = reconcileProgressionStates(state, rebirthed);
+    assert.equal(reconciledAfterRebirth.rebirthCount, 1);
+    assert.equal(reconciledAfterRebirth.upgrades.attack, 0);
+    assert.equal(reconciledAfterRebirth.mojoBalance, 200);
   });
 });

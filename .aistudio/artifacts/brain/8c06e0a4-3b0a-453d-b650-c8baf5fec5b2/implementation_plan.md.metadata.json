@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for automatic Nostr relay health probing with manual override toggle, Amethyst nsite compatibility (removing HTML form submit events, adding nsite manifest & relative build paths), baked-in moji-curator-blocklist/v1 NSFW blocklist and JSON importer, Career Rebirth prestige system, and expanded lifetime totals & leaderboard filters.",
+  "updatedAt": "2026-11-05T04:51:52.171510578Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

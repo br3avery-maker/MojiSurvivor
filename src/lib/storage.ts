@@ -117,6 +117,7 @@ export interface GameSettings {
   emojiFilterMode: EmojiFilterMode;
   arenaBgStyle?: ArenaBgStyleSetting;
   opaqueAssetBacking?: boolean;
+  autoManageRelays?: boolean;
 }
 
 /**
@@ -129,6 +130,7 @@ export interface CreditedRunLedgerEntry {
   mojo: number;
   careerXp: number;
   kills: number;
+  bosses?: number;
   wave: number;
   score: number;
   completed: boolean;
@@ -170,11 +172,15 @@ export interface PersistedGameState {
   playerLevel: number;
   playerXp: number;
   playerXpNext: number;
+  rebirthCount?: number;
+  mojoSpentOnRebirths?: number;
 
   // High-water marks & totals
   highScore: number;
+  lifetimeScore?: number;
   bestWave: number;
   totalKills: number;
+  totalBossKills?: number;
   totalRuns: number;
 
   // First-time Nostr relay content warning acknowledgment timestamp (`null` until accepted)
@@ -234,10 +240,17 @@ export interface PendingPostRunSession {
 }
 
 export const DEFAULT_RELAYS: string[] = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
   'wss://relay.primal.net',
+  'wss://relay.nostr.band',
+  'wss://offchain.pub',
+  'wss://nostr.mom',
 ];
+
+export const DEPRECATED_OR_PAID_RELAYS = new Set<string>([
+  'wss://relay.damus.io',
+  'wss://nostr.wine',
+  'wss://nos.lol',
+]);
 
 export const CURRENT_SCHEMA_VERSION = 3;
 const STORAGE_KEY_V3 = 'mojisurvivor_v3_state';
@@ -410,9 +423,13 @@ export function createDefaultState(): PersistedGameState {
     playerLevel: 1,
     playerXp: 0,
     playerXpNext: 100,
+    rebirthCount: 0,
+    mojoSpentOnRebirths: 0,
     highScore: 0,
+    lifetimeScore: 0,
     bestWave: 1,
     totalKills: 0,
+    totalBossKills: 0,
     totalRuns: 0,
     contentWarningAcceptedAt: null,
     upgrades: {
@@ -449,6 +466,7 @@ export function createDefaultState(): PersistedGameState {
       emojiFilterMode: 'open_with_banlist',
       arenaBgStyle: 'auto',
       opaqueAssetBacking: true,
+      autoManageRelays: true,
     },
   };
 }
@@ -481,12 +499,19 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
   const base = createDefaultState();
 
   const upgrades = sanitizeUpgrades(src.upgrades as Partial<UpgradeLevels> | undefined);
-  const spentOnUpgrades = computeTotalMojoSpentOnUpgrades(upgrades);
+  const rawRebirthCount = Math.max(0, Math.floor(Number(src.rebirthCount ?? 0) || 0));
+  const rawMojoSpentOnRebirths = Math.max(
+    0,
+    Math.floor(Number(src.mojoSpentOnRebirths ?? 0) || 0)
+  );
+  const spentOnUpgrades = computeTotalMojoSpentOnUpgrades(upgrades) + rawMojoSpentOnRebirths;
 
   const rawMojoBalance = Math.max(0, Math.floor(Number(src.mojoBalance ?? 0) || 0));
   const rawHighScore = Math.max(0, Math.floor(Number(src.highScore ?? 0) || 0));
+  const rawLifetimeScore = Math.max(0, Math.floor(Number(src.lifetimeScore ?? 0) || 0));
   const rawBestWave = Math.max(1, Math.floor(Number(src.bestWave ?? 1) || 1));
   const rawTotalKills = Math.max(0, Math.floor(Number(src.totalKills ?? 0) || 0));
+  const rawTotalBossKills = Math.max(0, Math.floor(Number(src.totalBossKills ?? 0) || 0));
   const rawTotalRuns = Math.max(0, Math.floor(Number(src.totalRuns ?? 0) || 0));
 
   // Settings & npub Moderation Lists (zero keyword/shortcode censorship)
@@ -609,6 +634,7 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
         mojo: Math.max(0, Math.floor(Number(entry.mojo ?? 0) || 0)),
         careerXp: Math.max(0, Math.floor(Number(entry.careerXp ?? 0) || 0)),
         kills: Math.max(0, Math.floor(Number(entry.kills ?? 0) || 0)),
+        bosses: Math.max(0, Math.floor(Number(entry.bosses ?? 0) || 0)),
         wave: Math.max(1, Math.floor(Number(entry.wave ?? 1) || 1)),
         score: Math.max(0, Math.floor(Number(entry.score ?? 0) || 0)),
         completed: Boolean(entry.completed),
@@ -628,6 +654,7 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
         mojo: rec.mojoEarned,
         careerXp: estXp,
         kills: rec.defeated,
+        bosses: rec.bossesDefeated,
         wave: rec.wave,
         score: rec.score,
         completed: true,
@@ -750,13 +777,19 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
     Object.values(codex).reduce((acc, c) => acc + c.kills, 0)
   );
 
-  // Relays
+  const autoManageRelays =
+    typeof rawSettings.autoManageRelays === 'boolean' ? rawSettings.autoManageRelays : true;
+
+  // Relays: if autoManageRelays is enabled, strip deprecated/dead/paid default relays
   const cleanedRelays = Array.isArray(src.relays)
     ? Array.from(
         new Set(
           src.relays
             .map((r) => (typeof r === 'string' ? sanitizeRelayUrl(r) : undefined))
-            .filter((r): r is string => Boolean(r))
+            .filter(
+              (r): r is string =>
+                Boolean(r) && (!autoManageRelays || !DEPRECATED_OR_PAID_RELAYS.has(r!))
+            )
         )
       )
     : [];
@@ -803,6 +836,7 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
       typeof rawSettings.opaqueAssetBacking === 'boolean'
         ? rawSettings.opaqueAssetBacking
         : true,
+    autoManageRelays,
   };
 
   // Progress Sync
@@ -828,6 +862,11 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
     lastError: rawSync.lastError ? String(rawSync.lastError) : undefined,
   };
 
+  const receiptsBossFloor = localReceipts.reduce((acc, r) => acc + (r.bossesDefeated || 0), 0);
+  const receiptsScoreSum = localReceipts.reduce((acc, r) => acc + (r.score || 0), 0);
+  const ledgerScoreSum = Object.values(creditedRuns).reduce((acc, r) => acc + (r.score || 0), 0);
+  const ledgerBossSum = Object.values(creditedRuns).reduce((acc, r) => acc + (r.bosses || 0), 0);
+
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     revision: Math.max(0, Math.floor(Number(src.revision ?? 1) || 1)),
@@ -840,15 +879,19 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
     playerLevel: career.playerLevel,
     playerXp: career.playerXp,
     playerXpNext: career.playerXpNext,
+    rebirthCount: rawRebirthCount,
+    mojoSpentOnRebirths: rawMojoSpentOnRebirths,
     highScore: Math.max(
       rawHighScore,
       localReceipts.reduce((m, r) => Math.max(m, r.score), 0)
     ),
+    lifetimeScore: Math.max(rawLifetimeScore, receiptsScoreSum, ledgerScoreSum, rawHighScore),
     bestWave: Math.max(
       rawBestWave,
       localReceipts.reduce((m, r) => Math.max(m, r.wave), 1)
     ),
     totalKills: Math.max(rawTotalKills, codexKillsFloor),
+    totalBossKills: Math.max(rawTotalBossKills, receiptsBossFloor, ledgerBossSum),
     totalRuns: Math.max(rawTotalRuns, localReceipts.length),
     upgrades,
     codex,
@@ -1019,7 +1062,24 @@ export function reconcileProgressionStates(
     basePreLedgerMojo + ledgerMojoSum
   );
 
-  const totalSpent = computeTotalMojoSpentOnUpgrades(mergedUpgrades);
+  const localRebirthCount = local.rebirthCount ?? 0;
+  const incomingRebirthCount = incoming.rebirthCount ?? 0;
+  const mergedRebirthCount = Math.max(localRebirthCount, incomingRebirthCount);
+  const mergedMojoSpentOnRebirths = Math.max(
+    local.mojoSpentOnRebirths ?? 0,
+    incoming.mojoSpentOnRebirths ?? 0
+  );
+
+  // If one snapshot has a higher rebirthCount, honor the upgrades from the higher-rebirth state
+  const effectiveUpgrades: UpgradeLevels =
+    localRebirthCount !== incomingRebirthCount
+      ? localRebirthCount > incomingRebirthCount
+        ? { ...local.upgrades }
+        : { ...incoming.upgrades }
+      : mergedUpgrades;
+
+  const totalSpent =
+    computeTotalMojoSpentOnUpgrades(effectiveUpgrades) + mergedMojoSpentOnRebirths;
   const mojoBalance = Math.max(0, lifetimeMojoEarned - totalSpent);
 
   const localUnledgeredXp = Math.max(
@@ -1041,6 +1101,8 @@ export function reconcileProgressionStates(
 
   const codexKillsSum = Object.values(mergedCodex).reduce((s, c) => s + c.kills, 0);
   const completedLedgerRuns = Object.values(mergedCreditedRuns).filter((r) => r.completed).length;
+  const ledgerScoreSum = Object.values(mergedCreditedRuns).reduce((s, r) => s + (r.score || 0), 0);
+  const ledgerBossSum = Object.values(mergedCreditedRuns).reduce((s, r) => s + (r.bosses || 0), 0);
 
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -1055,16 +1117,30 @@ export function reconcileProgressionStates(
     playerLevel: career.playerLevel,
     playerXp: career.playerXp,
     playerXpNext: career.playerXpNext,
+    rebirthCount: mergedRebirthCount,
+    mojoSpentOnRebirths: mergedMojoSpentOnRebirths,
     highScore: Math.max(local.highScore, incoming.highScore),
+    lifetimeScore: Math.max(
+      local.lifetimeScore ?? 0,
+      incoming.lifetimeScore ?? 0,
+      ledgerScoreSum,
+      local.highScore,
+      incoming.highScore
+    ),
     bestWave: Math.max(local.bestWave, incoming.bestWave),
     totalKills: Math.max(local.totalKills, incoming.totalKills, codexKillsSum),
+    totalBossKills: Math.max(
+      local.totalBossKills ?? 0,
+      incoming.totalBossKills ?? 0,
+      ledgerBossSum
+    ),
     totalRuns: Math.max(
       local.totalRuns,
       incoming.totalRuns,
       completedLedgerRuns,
       mergedReceipts.length
     ),
-    upgrades: mergedUpgrades,
+    upgrades: effectiveUpgrades,
     codex: mergedCodex,
     blockedEmojiKeys: mergedBlockedEmojiKeys,
     nsfwBanPubkeys: mergedNsfwBanPubkeys,
@@ -1093,6 +1169,7 @@ export function applyRunCheckpointToState(
     mojoEarnedTotal: number;
     careerXpEarnedTotal: number;
     killsTotal: number;
+    bossesDefeatedTotal?: number;
     waveReached: number;
     scoreReached: number;
     completed: boolean;
@@ -1102,24 +1179,34 @@ export function applyRunCheckpointToState(
   const prevMojo = existing?.mojo ?? 0;
   const prevXp = existing?.careerXp ?? 0;
   const prevKills = existing?.kills ?? 0;
+  const prevBosses = existing?.bosses ?? 0;
+  const prevScore = existing?.score ?? 0;
   const wasCompleted = existing?.completed ?? false;
 
   const nextMojo = Math.max(prevMojo, Math.max(0, Math.floor(checkpoint.mojoEarnedTotal)));
   const nextXp = Math.max(prevXp, Math.max(0, Math.floor(checkpoint.careerXpEarnedTotal)));
   const nextKills = Math.max(prevKills, Math.max(0, Math.floor(checkpoint.killsTotal)));
+  const nextBosses = Math.max(
+    prevBosses,
+    Math.max(0, Math.floor(checkpoint.bossesDefeatedTotal ?? 0))
+  );
   const nextWave = Math.max(existing?.wave ?? 1, Math.max(1, Math.floor(checkpoint.waveReached)));
-  const nextScore = Math.max(existing?.score ?? 0, Math.max(0, Math.floor(checkpoint.scoreReached)));
+  const nextScore = Math.max(prevScore, Math.max(0, Math.floor(checkpoint.scoreReached)));
   const nowCompleted = wasCompleted || checkpoint.completed;
 
   const deltaMojo = nextMojo - prevMojo;
   const deltaXp = nextXp - prevXp;
   const deltaKills = nextKills - prevKills;
+  const deltaBosses = nextBosses - prevBosses;
+  const deltaScore = nextScore - prevScore;
   const deltaRuns = !wasCompleted && checkpoint.completed ? 1 : 0;
 
   if (
     deltaMojo === 0 &&
     deltaXp === 0 &&
     deltaKills === 0 &&
+    deltaBosses === 0 &&
+    deltaScore === 0 &&
     deltaRuns === 0 &&
     nextScore <= prev.highScore &&
     nextWave <= prev.bestWave &&
@@ -1141,6 +1228,7 @@ export function applyRunCheckpointToState(
       mojo: nextMojo,
       careerXp: nextXp,
       kills: nextKills,
+      bosses: nextBosses,
       wave: nextWave,
       score: nextScore,
       completed: nowCompleted,
@@ -1166,8 +1254,10 @@ export function applyRunCheckpointToState(
       playerXp: career.playerXp,
       playerXpNext: career.playerXpNext,
       highScore: Math.max(prev.highScore, nextScore),
+      lifetimeScore: (prev.lifetimeScore ?? 0) + deltaScore,
       bestWave: Math.max(prev.bestWave, nextWave),
       totalKills: prev.totalKills + deltaKills,
+      totalBossKills: (prev.totalBossKills ?? 0) + deltaBosses,
       totalRuns: prev.totalRuns + deltaRuns,
       creditedRuns: trimmed,
       progressSync: prev.progressSync.enabled
@@ -1187,13 +1277,79 @@ export function applyRunCheckpointToState(
     playerXp: career.playerXp,
     playerXpNext: career.playerXpNext,
     highScore: Math.max(prev.highScore, nextScore),
+    lifetimeScore: (prev.lifetimeScore ?? 0) + deltaScore,
     bestWave: Math.max(prev.bestWave, nextWave),
     totalKills: prev.totalKills + deltaKills,
+    totalBossKills: (prev.totalBossKills ?? 0) + deltaBosses,
     totalRuns: prev.totalRuns + deltaRuns,
     creditedRuns: updatedCredited,
     progressSync: prev.progressSync.enabled
       ? { ...prev.progressSync, dirty: true }
       : prev.progressSync,
+  };
+}
+
+export function computeTotalUpgradeLevels(upgrades: UpgradeLevels): number {
+  return (
+    (upgrades.attack || 0) +
+    (upgrades.defense || 0) +
+    (upgrades.speed || 0) +
+    (upgrades.regen || 0) +
+    (upgrades.magnet || 0)
+  );
+}
+
+export function canPerformCareerRebirth(state: PersistedGameState): boolean {
+  const totalUpgradeLevels = computeTotalUpgradeLevels(state.upgrades);
+  return state.playerLevel >= 20 || totalUpgradeLevels >= 15;
+}
+
+/**
+ * Triggers Career Rebirth Prestige:
+ * Resets Upgrade Lab levels to 0 in exchange for +1 permanent Rebirth Tier (`rebirthCount + 1`),
+ * locking the Mojo invested in previous upgrades into `mojoSpentOnRebirths` so anti-duplication
+ * accounting remains exact across reloads and Nostr progression syncs.
+ */
+export function performCareerRebirth(prev: PersistedGameState): {
+  ok: boolean;
+  nextState: PersistedGameState;
+  newRebirthCount: number;
+  error?: string;
+} {
+  if (!canPerformCareerRebirth(prev)) {
+    return {
+      ok: false,
+      nextState: prev,
+      newRebirthCount: prev.rebirthCount ?? 0,
+      error: 'Reach Career Player Lv.20 or 15 total Upgrade Lab levels to unlock Career Rebirth.',
+    };
+  }
+
+  const currentUpgradeMojo = computeTotalMojoSpentOnUpgrades(prev.upgrades);
+  const nextRebirthCount = (prev.rebirthCount ?? 0) + 1;
+
+  const nextState: PersistedGameState = {
+    ...prev,
+    revision: prev.revision + 1,
+    updatedAt: Date.now(),
+    rebirthCount: nextRebirthCount,
+    mojoSpentOnRebirths: (prev.mojoSpentOnRebirths ?? 0) + currentUpgradeMojo,
+    upgrades: {
+      attack: 0,
+      defense: 0,
+      speed: 0,
+      regen: 0,
+      magnet: 0,
+    },
+    progressSync: prev.progressSync.enabled
+      ? { ...prev.progressSync, dirty: true }
+      : prev.progressSync,
+  };
+
+  return {
+    ok: true,
+    nextState,
+    newRebirthCount: nextRebirthCount,
   };
 }
 
