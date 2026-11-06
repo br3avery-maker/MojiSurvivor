@@ -26,6 +26,7 @@ import {
   pubkeyHexToNpub,
   type EmojiFilterMode,
 } from '../lib/moderationLists';
+import { buildPlayerStatsForAwards } from '../lib/awardsAndCards';
 import {
   encodeFullNpub,
   formatShortNpub,
@@ -34,10 +35,16 @@ import {
   type MojiNostrCoordinator,
   type NostrProfileMeta,
   type RelayModerationReport,
+  type VerifiedLeaderboardEntry,
 } from '../lib/nostrEngine';
 import { ARENA_PIXEL_BG_OPTIONS } from '../lib/pixelBackgrounds';
 import { sanitizeRelayUrl } from '../lib/sanitizeUrl';
-import type { GameSettings, NostrProgressSyncState } from '../lib/storage';
+import type {
+  GameSettings,
+  NostrProgressSyncState,
+  PersistedGameState,
+} from '../lib/storage';
+import { PlayerTradingCard } from './PlayerTradingCard';
 
 export type AccordionPanel = 'profile' | 'relays' | 'moderation' | 'game';
 
@@ -49,6 +56,8 @@ interface IdentitySettingsViewProps {
   playerXp: number;
   playerXpNext: number;
   mojoBalance: number;
+  persistedState?: PersistedGameState;
+  myRelayRuns?: VerifiedLeaderboardEntry[];
   progressSync: NostrProgressSyncState;
   storageError: string | null;
   relays: string[];
@@ -104,6 +113,8 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
   playerXp,
   playerXpNext,
   mojoBalance,
+  persistedState,
+  myRelayRuns,
   progressSync,
   storageError,
   relays,
@@ -537,10 +548,23 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
         </button>
 
         {openPanel === 'profile' && (
-          <div className="px-4 pb-4 pt-1 border-t border-white/10 space-y-4">
+          <div className="px-4 pb-4 pt-2 border-t border-white/10 space-y-4">
+            {persistedState && (
+              <PlayerTradingCard
+                stats={buildPlayerStatsForAwards({
+                  pubkey: coordinator.pubkey,
+                  persisted: persistedState,
+                  relayRuns: myRelayRuns ?? [],
+                  localReceipts: persistedState.localReceipts,
+                })}
+                profile={profile}
+                defaultAvatarUrl={defaultAvatarUrl}
+              />
+            )}
+
             {isSignedIn ? (
               /* SIGNED-IN STATE: Sign-in forms hidden; displays active account + Log Out */
-              <div className="space-y-3 pt-2">
+              <div className="space-y-3 pt-1">
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="w-12 h-12 rounded-xl emoji-opaque-pod p-0.5 overflow-hidden shrink-0">
@@ -566,7 +590,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                         </div>
                       )}
                       <div className="text-xs text-[#B8B8B8] mt-0.5">
-                        Signed in via {signerLabel} · Player Lv.{playerLevel} ({playerXp}/{playerXpNext} XP)
+                        Signed in via {signerLabel} · Cycle Lv.{playerLevel} ({playerXp}/{playerXpNext} XP)
                       </div>
                     </div>
                   </div>

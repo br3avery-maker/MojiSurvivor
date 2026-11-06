@@ -1,70 +1,96 @@
-# MojiSurvivor — Relay Auto-Discovery, Amethyst Nsite Hardening, Moderation Blocklist & Career Rebirth Plan
+# Moji Survivor — Rebirth Reset Fix, Historical & Moji Leaderboards, Trading-Card Profiles & Math Awards
 
-## 1. Architectural & Feature Overview
+Fixes the infinite Career Rebirth exploit by resetting cycle Player Level to `Lv.1` on Rebirth while preserving `Lifetime XP` for all-time stats, upgrades the Leaderboard to aggregate full player run histories and auto-merge your own relay receipts into local stats, adds a collectible **Moji Leaderboard** with rarity graphics (featuring **Prismatic Rainbow + Silver Sparkles** for Mythic/Apex cards and zero gold), and introduces **Trading-Card Player Profiles** with deterministic **Silly Math Awards** and queryable Nostr event tags.
 
-This update resolves relay connectivity bottlenecks, hardens compatibility with the Amethyst Android `nsite` browser, ensures clean production builds (`npm run build`), integrates the `moji-curator-blocklist/v1` NSFW publisher/emoji blocklist, and expands progression with **Career Rebirth Prestige** and **Lifetime Totals & Leaderboard Filters**.
+### User Review & Critical Decisions
 
----
+> [!IMPORTANT]
+> Updated Mythic/Apex rarity and Trading Card styling to use **Holographic Rainbow with Chrome Silver Sparkles** (no gold!). Click **Proceed** when ready to build.
 
-## 2. Core Systems & Implementation Details
-
-### A. Automatic Relay Discovery, Health Probing & Manual Override Toggle
-* **Curated Public Relay Candidate Pool (`/src/lib/nostrEngine.ts`)**:
-  * Expand the candidate pool of free public Nostr relays known to serve kinds `0`, `1984`, `10002`, `10030`, `30030`, and `30078` (e.g., `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.primal.net`, `wss://purplepag.es`, `wss://relay.nostr.band`, `wss://nostr.wine`, `wss://offchain.pub`, `wss://relay.snort.social`).
-  * Implement `probeRelaysHealth()` in `NostrCoordinator`: on app startup or manual sync, runs a lightweight concurrent WebSocket probe (`REQ` for a single `30030` event with a 3.5s timeout) measuring round-trip `latencyMs`, connection state (`online` | `degraded` | `unreachable`), and read/write responsiveness.
-  * Automatically prune unreachable/timed-out relays from active query loops so the client never repeatedly pings dead relays on subsequent syncs.
-* **Auto-Manage Relays Toggle (`/src/lib/storage.ts`, `/src/components/IdentitySettingsView.tsx`)**:
-  * Add `autoManageRelays: boolean` (default `true`) to `PlayerProfileState`.
-  * When `autoManageRelays` is enabled, the coordinator automatically selects and connects to the top responsive relays from the probe and displays live per-relay status badges (`online` + latency in ms) and a **"Re-Scan Healthy Relays"** button.
-  * Users can flip the **"Auto-Manage Relays"** toggle off at any time to expose custom relay management (add/remove `wss://` relays manually).
-
-### B. Amethyst `nsite` Browser Compatibility & `npm run build` Reliability
-* **Eliminate All `<form onSubmit>` Tags (`/src/components/IdentitySettingsView.tsx`, `/src/components/CodexView.tsx`)**:
-  * Amethyst's hardened `nsite` WebView blocks HTML `<form>` submission events under strict CSP/sandbox rules (`form-action 'none'`).
-  * Convert all 7 `<form>` wrappers (Relay addition, NIP-55 Android Signer pubkey bind, NIP-46 Bunker URI connect, Local `nsec` import, Banned Hash add, Banned Author `npub`/hex add, and Safe Hash add) into `<div>` flex containers with `onKeyDown={(e) => e.key === 'Enter' && ...}` on the `<input>` and `type="button" onClick={...}` on the action button.
-* **Nsite Permission Manifests & Relative Asset Bundling (`/public/.well-known/nostr.json`, `/public/manifest.webmanifest`, `/index.html`, `/vite.config.ts`)**:
-  * Add `public/manifest.webmanifest` and `public/.well-known/nostr.json` declaring `nip07`, `nip46`, `nip55`, and WebSocket relay permissions for `nsite` gateways and Android WebView containers.
-  * Set `base: './'` in `vite.config.ts` and clean relative asset references so static `nsite` blossom deployments and `npm run build` succeed cleanly in any environment.
-
-### C. Built-In `moji-curator-blocklist/v1` NSFW Blocklist & JSON Importer
-* **Baked-In Publishers & Emoji URL Hashes (`/src/lib/moderationLists.ts`)**:
-  * Bake all 9 unique NSFW publisher hex pubkeys from the user's `moji-curator-blocklist/v1` report into `BUILTIN_BLOCKED_PUBKEYS`:
-    * `1a21da9d5ae3dffdac19adf5e400394401f67f8da4113a1b7bdece35b0d99fe2`
-    * `415778be61cfd789cd58eb06c902706b49dc7da16b0a22125670dff33d81dc42`
-    * `f4b55ea7491fb70849afa6f673fc58846b61ce7efb1d8051bbae35b0d99fe2` (`f4b55ea7491fb70849afa6f673fc58846b61ce7efb1d8051bbae35d1a13a48ab`)
-    * `983d5dae1d2280926cf90c037394dbda4348503f4cc342464df7fde98cabecdf`
-    * `626b275b16dec6db7a27e807c2db690e71b4d42d482f1817ab370601eeabb735`
-    * `0b7943cce4a9c7fee87a7921b6201d4f847defc2064d6ba6ad3e3f6cdc43c1b3`
-    * `0a717f27d9ef6f45dafe49f14a49fa4bac8c51b7efc85ff1f318779d8c43707b`
-    * `4b56bbf41c92e586e88927acb78836eb49f2b184081ef852625cf78be7d56bd6`
-    * `025cf9571bc0c7172802bcb37c9de29fcc852f59a4f7c84231ef8eb6fcae30dc`
-  * Pre-compute and bake the SHA-256 normalized URL hashes for all 4 specific blocked emoji URLs into `BUILTIN_BLOCKED_HASHES`, and also block matching exact normalized URLs.
-* **`moji-curator-blocklist/v1` JSON Importer (`/src/components/IdentitySettingsView.tsx`)**:
-  * Add a bulk JSON import/paste modal in the Moderation panel that parses `moji-curator-blocklist/v1` payloads, hashes any `blocked[].url` entries, extracts `blocked[].author` and `blockedPublishers[]`, and merges them directly into the player's local & NIP-51 moderation lists.
-
-### D. Career Rebirth Prestige System
-* **Prestige Loop (`/src/lib/storage.ts`, `/src/lib/gameEngine.ts`, `/src/components/UpgradeLabView.tsx`)**:
-  * Track `rebirthCount: number` and `lifetimeMojoEarned: number` on `PlayerProfileState` (and persist in Nostr Kind `30078` progression snapshots).
-  * Once a player reaches **Career Player Lv. 20+** (20 total upgrade levels purchased), unlock the **Career Rebirth** chamber in the Upgrade Lab:
-    * Resetting Upgrade Lab levels to 0 grants **+1 Rebirth Tier** (`rebirthCount + 1`).
-    * Each Rebirth Tier grants permanent multiplicative combat bonuses that persist across all runs and stack with Upgrade Lab levels:
-      * **+15% Weapon Damage** per Rebirth Tier
-      * **+12% Mojo Bounty** per Rebirth Tier
-      * **+10% Max Hull Integrity** per Rebirth Tier
-    * Displays a Rebirth Prestige badge (`Rebirth I`, `Rebirth II`, etc.) on the HUD and Leaderboard receipts.
-
-### E. Expanded Lifetime Totals & Leaderboard Filters
-* **Career Totals Ribbon & Sort Filters (`/src/components/LeaderboardView.tsx`, `/src/lib/storage.ts`, `/src/lib/nostrEngine.ts`)**:
-  * Track cumulative career stats in `PlayerProfileState`: `totalRuns`, `totalScore`, `totalKills`, `totalBossKills`, `bestScore`, `highestWave`, and `rebirthCount`.
-  * Add a **Career Lifetime Totals** summary strip at the top of the Leaderboard view showing personal lifetime totals alongside global relay stats.
-  * Add interactive Leaderboard filter/sort tabs (`Best Score`, `Highest Wave`, `Most Defeated`, `Apex Boss Slayers`) so players can rank runs across different survival metrics.
+- **Confirmed Decision 1 — Rebirth Resets Cycle Player Level to `Lv.1` (Preserving `Lifetime XP`)**: Ascending to a new Rebirth Tier resets both your 5 Upgrade Lab tracks (`0/44`) and your active cycle Player Level back to `Lv.1 (0/100 XP)` by recording `xpSpentOnRebirths`, while keeping `lifetimeXpEarned` untouched for your Trading Card and badge math.
+- **Confirmed Decision 2 — Full Run History Leaderboards & Own-Run Auto-Merge**: Aggregates all signed `kind: 30078` run receipts per player (supporting both **All-Time Career Totals** and **Best Single Run** views plus expandable per-player run history timelines) and automatically merges your own verified relay runs back into your local `highScore`, `bestWave`, and career totals.
+- **Confirmed Decision 3 — Moji Leaderboard with Rainbow + Silver Sparkle Mythic Rarity**: Adds a dedicated **Moji Ranks** view in `Ranks` with collectible rarity frames (`Common`, `Uncommon`, `Rare`, `Epic`, and **Mythic / Apex** rendered in **Prismatic Rainbow with Chrome Silver Sparkles**—no gold).
+- **Confirmed Decision 4 — Collectible Trading-Card Profiles, Silly Awards & Queryable Tags**: Upgrades the `Profile` tab (and player inspection on the Leaderboard) with a visual **Survivor Trading Card** (plus downloadable/shareable PNG card generator), deterministic **Silly Awards & Badges** computed purely from signed math, and queryable stat/badge tags on `kind: 30078` events.
 
 ---
 
-## 3. Verification Plan
-1. **Unit & Integration Suite (`npm test -- --run`)**:
-   * Verify `BUILTIN_BLOCKED_PUBKEYS` and `BUILTIN_BLOCKED_HASHES` block all publishers and URLs from the `moji-curator-blocklist/v1` payload.
-   * Verify `parseCuratorBlocklistJson` accurately extracts authors, publishers, and URL hashes.
-   * Verify Career Rebirth resets upgrade levels while incrementing `rebirthCount` and applying permanent stat multipliers in `MojiSurvivorEngine`.
-2. **Build & Lint Verification (`compile_applet` & `lint_applet`)**:
-   * Ensure zero TypeScript or ESLint errors and clean relative bundle generation (`npm run build`).
+### 1. Overview & Core Concept
+
+- **What It Does**:
+  1. Makes Career Rebirth a true prestige loop where your cycle level resets to `Lv.1` and your Upgrade Lab resets to `0/44`, requiring real progression in each Rebirth cycle while preserving all-time `Lifetime XP`.
+  2. Turns the `Ranks` view into a full historical Nostr stat hub with **Player Career Totals**, **Best Single Runs**, expandable **Player Run Histories**, and a **Moji Leaderboard** showcasing the most-slain and most-featured custom emojis with holographic rarity graphics.
+  3. Introduces collectible **Survivor Trading Cards** on the `Profile` tab and Leaderboard player modal—complete with Weapon Mastery, Top Defeated Mojis, deterministic **Silly Math Awards**, and queryable `kind: 30078` tags so badge verification is pure math.
+- **Target Audience / Persona**: Nostr players and custom emoji collectors competing on Android and web who want persistent historical leaderboards, collectible trading cards, and verifiable on-relay achievements.
+- **Key Value**: Fixes progression balance, ensures your Lobby and Profile always reflect your highest relay-verified runs, and makes every custom NIP-30 emoji and player career feel like a collectible card game.
+
+---
+
+### 2. User Experience & Visual Design
+
+- **Key User Flows**:
+  1. **Rebirth Cycle Reset (`Upgrades`)**:
+     - Shows accurate `totalUpgradeLevels / 44` progress (`10 + 10 + 8 + 8 + 8`).
+     - Displays both **Cycle Level (`Lv.X`)** and **All-Time Lifetime XP**.
+     - Clicking **Ascend to Rebirth Tier N** resets Upgrade Lab levels to `0/44` and active Cycle Level to `Lv.1 (0/100 XP)` while preserving `Lifetime XP`, unspent Mojo, and Codex unlocks.
+  2. **Historical Player Leaderboards & Moji Leaderboard (`Ranks`)**:
+     - **Top Mode Switch**: `Player Ranks` · `Moji Leaderboard` · `My Receipts`.
+     - **Player Ranks**: Toggle between **Career Totals** (sums all verified `kind: 30078` run receipts + published progress snapshots per pubkey: Cumulative Score, Total Kills, Total Bosses, Run Count) and **Single Run Best** (`Best Score`, `Highest Wave`, `Most Defeated`, `Boss Slayers`).
+     - **Expandable Player History & Trading Card Modal**: Tapping any ranked player opens their **Survivor Trading Card**, unlocked **Silly Awards**, and their chronological list of verified Nostr run receipts.
+     - **Auto-Merge Own Relay Runs**: Whenever relay sync finds verified `kind: 30078` runs authored by your active `pubkey` (such as an older `180,530` score run from another session/device), it automatically reconciles them into your local `highScore`, `bestWave`, `localReceipts`, and `creditedRuns` ledger so your Lobby and Profile are immediately up to date.
+     - **Moji Leaderboard**: Ranks custom NIP-30 emojis across `Most Slain`, `Featured in Top Runs`, and `Highest Power Rating`, rendered inside **Rarity Graphic Cards** with holographic tier borders, combat archetype badges, and pack attribution.
+  3. **Survivor Trading Card & Silly Awards (`Profile`)**:
+     - Displays your interactive **Survivor Trading Card** right at the top of the `Profile` tab with foil/neon rarity styling based on your Rebirth Tier & Career Level, showing `Cycle Lv.`, `Lifetime XP`, `Rebirth Tier`, `Lifetime Score`, `Best Run`, `Total Kills`, `Bosses Slain`, `Signature Weapon`, and `Most Slain Moji`.
+     - Includes a **Silly Awards & Math Badges Case** where each badge shows the exact mathematical formula and verified progress bar (e.g., *Cursed Banker*, *Emoji Exterminator*, *Apex Bully*, *Ascension Addict*, *Glass Cannon*, *Centurion*, *Spellweaver Supreme*, *Codex Hoarder*).
+     - Includes a **"Share / Download Trading Card PNG"** button that renders the full collectible trading card with your avatar, stats, top Moji sprite, and badges onto an exportable high-res canvas.
+
+- **Visual Identity & Rarity Graphics System (Zero Gold — Prismatic Rainbow & Silver Sparkles)**:
+  - *Aesthetic Direction*: High-contrast arcade trading-card vault in Moji Survivor's signature Pitch Black (`#000000`) and BreBre Deep Pink (`#FF1493`) palette (`🖤💗`), accented with Cyber Cyan (`#00F0FF`) and Chrome Silver (`#E2E8F0` / `#FFFFFF`).
+  - *Rarity Graphics Tiers (for Moji Cards & Survivor Trading Cards)*:
+    - **Common (`Matte Slate #64748B`)**: Clean geometric frame with subtle grid backing.
+    - **Uncommon (`Neon Mint #10B981`)**: Dual-line tech frame with corner brackets.
+    - **Rare (`Cyber Cyan #00F0FF`)**: Radiant cyan circuit border with diagonal sheen.
+    - **Epic (`BreBre Pink #FF1493`)**: Neon magenta twin-bezel frame with corner emblems.
+    - **Mythic / Apex (`Prismatic Rainbow + Silver Sparkles`)**: Iridescent full-spectrum rainbow gradient border (`#FF1493 → #FF6B00 → #00F5D4 → #00F0FF → #A855F7 → #FF1493`) overlaid with crisp **Chrome Silver (`#FFFFFF` / `#CBD5E1`) 4-point star sparkles** and holographic foil shimmer (both in the DOM card component and the Canvas PNG Trading Card renderer).
+
+---
+
+### 3. Key Product Decisions & Trade-Offs
+
+- **Decision 1 — Tracking `xpSpentOnRebirths` vs. Erasing `lifetimeXpEarned`**
+  - *Chosen Approach*: Add `xpSpentOnRebirths` to `PersistedGameState`. Active `playerLevel`, `playerXp`, and `playerXpNext` are derived from `cycleXp = Math.max(0, lifetimeXpEarned - xpSpentOnRebirths)`, which resets to `0` (`Lv.1`) on each Rebirth while `lifetimeXpEarned` continues growing monotonically forever.
+  - *Why*: Resets your active level to `Lv.1` as requested (fixing the infinite Rebirth bug) without destroying your all-time XP history needed for Trading Card stats and Nostr badge math.
+
+- **Decision 2 — Deterministic Math Engine for Silly Awards & Queryable Nostr Tags**
+  - *Chosen Approach*: Compute all awards via a pure, deterministic function `evaluatePlayerAwards(stats)` that takes verifiable numbers (`totalRuns`, `lifetimeScore`, `highScore`, `bestWave`, `totalKills`, `totalBossKills`, `rebirthCount`, `mojoBalance`, `lifetimeMojoEarned`, `codexCount`, `runs`) and outputs unlocked badges with their exact math proof. Publish these summary metrics and `["badge", "<badge_id>"]` tags on `kind: 30078` (`mojisurvivor:progress:v1`) and include `["featured_emoji", ...]` tags on run receipts.
+  - *Why*: Ensures badges are never arbitrary flags—any external script or player querying relays can verify the exact numbers and confirm every badge is legitimately earned.
+
+---
+
+### 4. Technical Architecture & Data Strategy *(Technical Reference)*
+
+- **Architecture & Component Diagram**:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                     MOJI SURVIVOR — STATS, RANKS & CARDS                     │
+│          [Lobby] · [Upgrades] · [Codex] · [Ranks] · [Profile]                │
+└─────────┬──────────────────────────┬──────────────────────────┬──────────────┘
+          │                          │                          │
+          ▼                          ▼                          ▼
+┌───────────────────────┐  ┌─────────────────────────┐  ┌──────────────────────┐
+│ REBIRTH & CYCLE XP    │  │ HISTORICAL & MOJI       │  │ TRADING CARD &       │
+│ ENGINE                │  │ LEADERBOARD AGGREGATOR  │  │ MATH BADGE ENGINE    │
+│ • cycleXp = lifetime  │  │ • Multi-Run Per-Player  │  │ • Deterministic      │
+│   - xpSpentOnRebirths │  │   History & Career Sums │  │   Silly Awards Math  │
+│ • Resets Lv.1 & 0/44  │  │ • Auto-Merge Own Relay  │  │ • Rainbow + Silver   │
+│   Upgrades on Rebirth │  │   Receipts into Local   │  │   Sparkle Foil Cards │
+│ • Preserves All-Time  │  │ • Moji Leaderboard      │  │ • Queryable 30078    │
+│   Lifetime XP & Mojo  │  │   (Kills/Featured/Power)│  │   Stat & Badge Tags  │
+└───────────────────────┘  └─────────────────────────┘  └──────────────────────┘
+```
+
+- **Data Model & Protocol Additions**:
+  - `PersistedGameState`: Adds `xpSpentOnRebirths?: number` (migrated cleanly so existing saves with `rebirthCount > 0` and `0` upgrades reset cycle XP to `Lv.1` until leveled again) and `MAX_TOTAL_UPGRADE_LEVELS = 44`.
+  - `PlayerLeaderboardAggregate`: Groups all verified `kind: 30078` run receipts by `pubkey`, computing `runCount`, `bestScore`, `cumulativeScore`, `bestWave`, `cumulativeKills`, `cumulativeBosses`, `favoriteWeapon`, `featuredEmojis`, and chronological `runs[]`, enriched with any published `mojisurvivor:progress:v1` snapshot.
+  - `MojiLeaderboardEntry`: Aggregates NIP-30 and Reserve emojis across local + relay snapshots and featured run tags, tracking `emojiKey`, `shortcode`, `url`, `tier` (`Common` | `Uncommon` | `Rare` | `Epic` | `Apex`), `powerRating`, `totalKills`, `timesFeaturedInRuns`, and `packTitle`.
+  - `SillyAwardEvaluation`: Pure mathematical evaluation for 10+ fun awards (*Cursed Banker*, *Ascension Addict*, *Emoji Exterminator*, *Apex Bully*, *Glass Cannon*, *Speedrunner*, *Centurion*, *Spellweaver Supreme*, *Codex Collector*, *Untouchable Wave*).

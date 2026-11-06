@@ -111,7 +111,7 @@ function getHonestPublicationBadge(receipt: RunReceiptRecord): {
     return {
       label: 'SIGNED LOCALLY · UNCONFIRMED',
       detail: `sig:${receipt.signedEvent.sig.slice(0, 12)} · pending relay OK`,
-      accent: '#FFD700',
+      accent: '#E2E8F0',
     };
   }
   return {
@@ -357,7 +357,7 @@ export async function renderRunScoreCardPng(
     {
       label: 'MOJO BANKED',
       value: `+${receipt.mojoEarned.toLocaleString()} MOJO`,
-      color: '#FFD700',
+      color: '#FFB6D9',
     },
     {
       label: 'DURATION',

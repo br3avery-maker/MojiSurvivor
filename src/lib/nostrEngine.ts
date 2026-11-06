@@ -52,6 +52,13 @@ import {
   type PersistedGameState,
   type RunReceiptRecord,
 } from './storage';
+import {
+  buildPlayerStatsForAwards,
+  determineMojiRarity,
+  evaluatePlayerAwards,
+  getMojiSillySuperlative,
+  type CardRarity,
+} from './awardsAndCards';
 
 export interface RelayProbeResult {
   url: string;
@@ -104,6 +111,45 @@ export interface VerifiedLeaderboardEntry {
   rawEvent: NostrEvent;
   source: 'relay' | 'local_confirmed';
   playerRunCount?: number;
+  featuredEmoji?: import('./storage').FeaturedEmojiSummary;
+}
+
+export interface PlayerLeaderboardAggregate {
+  pubkey: string;
+  npub: string;
+  runs: VerifiedLeaderboardEntry[];
+  bestScoreRun: VerifiedLeaderboardEntry;
+  bestWaveRun: VerifiedLeaderboardEntry;
+  mostDefeatedRun: VerifiedLeaderboardEntry;
+  mostBossesRun: VerifiedLeaderboardEntry;
+  careerTotalScore: number;
+  careerTotalDefeated: number;
+  careerTotalBosses: number;
+  careerRunCount: number;
+  bestScore: number;
+  bestWave: number;
+  bestSingleDefeated: number;
+  bestSingleBosses: number;
+  latestRunAt: number;
+  progressSnapshot?: PersistedGameState;
+}
+
+export interface AggregatedMojiLeaderboardEntry {
+  emojiKey: string;
+  shortcode: string;
+  url: string;
+  source: 'nip30' | 'reserve';
+  tier: string;
+  behavior: string;
+  powerRating: number;
+  packTitle: string;
+  packAuthor?: string;
+  hash?: string;
+  totalKills: number;
+  timesFeatured: number;
+  slainByPlayersCount: number;
+  rarity: CardRarity;
+  superlative: string;
 }
 
 export type ImageLoadStatus = 'loading' | 'ready' | 'broken';
@@ -323,6 +369,7 @@ export class MojiNostrCoordinator {
   public imageStatus = new Map<string, ImageLoadStatus>();
   public profiles = new Map<string, NostrProfileMeta>();
   public leaderboard = new Map<string, VerifiedLeaderboardEntry>();
+  public remoteProgressSnapshots = new Map<string, PersistedGameState>();
   private deletedEventIds = new Set<string>();
   private deletedAddresses = new Set<string>();
 
@@ -2077,7 +2124,8 @@ export class MojiNostrCoordinator {
     try {
       const events = await this.pool.query(
         [
-          { kinds: [30078], '#t': ['mojisurvivor'], limit: 120 },
+          { kinds: [30078], '#t': ['mojisurvivor'], limit: 150 },
+          { kinds: [30078], '#t': ['mojisurvivor-progress'], limit: 80 },
           { kinds: [5], '#k': ['30078'], limit: 100 },
         ],
         { signal: AbortSignal.timeout(9000) }
@@ -2117,8 +2165,28 @@ export class MojiNostrCoordinator {
       }
 
       const authorSet = new Set<string>();
+      const latestProgressByPubkey = new Map<string, { state: PersistedGameState; createdAt: number }>();
+
       for (const ev of events) {
         if (ev.kind !== 30078 || !verifyEvent(ev)) continue;
+        const dTag = ev.tags.find((t) => t[0] === 'd')?.[1] ?? '';
+        if (dTag === PROGRESS_SNAPSHOT_D_TAG) {
+          const parsedSnap = this.parseVerifiedProgressSnapshot(ev);
+          if (parsedSnap) {
+            const pk = ev.pubkey.toLowerCase();
+            const existingSnap = latestProgressByPubkey.get(pk);
+            if (!existingSnap || parsedSnap.createdAt >= existingSnap.createdAt) {
+              latestProgressByPubkey.set(pk, {
+                state: parsedSnap.state,
+                createdAt: parsedSnap.createdAt,
+              });
+              this.remoteProgressSnapshots.set(pk, parsedSnap.state);
+              authorSet.add(pk);
+            }
+          }
+          continue;
+        }
+
         const parsed = this.parseVerifiedScoreEvent(ev, 'relay');
         if (!parsed) continue;
         const addr = `30078:${parsed.pubkey}:${parsed.dTag}`;
@@ -2244,6 +2312,27 @@ export class MojiNostrCoordinator {
     const weaponsRaw = ev.tags.find((t) => t[0] === 'weapons')?.[1] ?? 'lightning_zap:1';
     const weapons = sanitizeDisplayText(weaponsRaw, 120) || 'lightning_zap:1';
 
+    let featuredEmoji: VerifiedLeaderboardEntry['featuredEmoji'];
+    const featTag = ev.tags.find((t) => t[0] === 'featured_emoji');
+    if (featTag && featTag.length >= 4) {
+      const cleanUrl = sanitizeUrl(featTag[3]) || (isGenuineReserveSvgUrl(featTag[3]) ? featTag[3] : null);
+      if (cleanUrl) {
+        const rawTier = sanitizeDisplayText(featTag[4] || 'Common', 16);
+        const validTier: import('./cryptoStats').EmojiTier =
+          rawTier === 'Apex' || rawTier === 'Epic' || rawTier === 'Rare'
+            ? rawTier
+            : 'Common';
+        featuredEmoji = {
+          emojiKey: sanitizeDisplayText(featTag[1], 80) || 'nip30:unknown',
+          shortcode: sanitizeShortcode(featTag[2]) || 'moji',
+          url: cleanUrl,
+          tier: validTier,
+          powerRating: Math.max(1, Math.min(100, Number(featTag[5]) || 50)),
+          packTitle: sanitizeDisplayText(featTag[6] || 'NIP-30 Pack', 36) || 'NIP-30 Pack',
+        };
+      }
+    }
+
     return {
       eventId: ev.id,
       dTag,
@@ -2260,6 +2349,7 @@ export class MojiNostrCoordinator {
       sigPrefix: ev.sig.slice(0, 12),
       rawEvent: ev,
       source,
+      featuredEmoji,
     };
   }
 
@@ -2271,26 +2361,48 @@ export class MojiNostrCoordinator {
     pubkeyOverride?: string
   ): Omit<NostrEvent, 'id' | 'pubkey' | 'sig'> {
     const ownerPubkey = (pubkeyOverride || receipt.pubkey || this.pubkey).toLowerCase();
+    const tags: string[][] = [
+      ['d', receipt.dTag],
+      ['t', 'mojisurvivor'],
+      ['p', ownerPubkey],
+      ['score', String(receipt.score)],
+      ['wave', String(receipt.wave)],
+      ['defeated', String(receipt.defeated)],
+      ['bosses', String(receipt.bossesDefeated)],
+      ['duration', String(receipt.durationSec)],
+      ['run_hash', receipt.runHash],
+      ['weapons', receipt.weaponsSummary],
+    ];
+
+    // If a pre-signed event already exists on this receipt, match its exact tag layout
+    const existingHasFeaturedTag = receipt.signedEvent?.tags.some(
+      (t) => t[0] === 'featured_emoji'
+    );
+    if (
+      receipt.featuredEmoji &&
+      (!receipt.signedEvent || existingHasFeaturedTag)
+    ) {
+      tags.push([
+        'featured_emoji',
+        receipt.featuredEmoji.emojiKey,
+        receipt.featuredEmoji.shortcode,
+        receipt.featuredEmoji.url,
+        receipt.featuredEmoji.tier,
+        String(receipt.featuredEmoji.powerRating),
+        receipt.featuredEmoji.packTitle || 'NIP-30 Pack',
+      ]);
+    }
+
+    tags.push(['client', 'mojisurvivor']);
+    tags.push([
+      'alt',
+      `MojiSurvivor run receipt: ${receipt.score.toLocaleString()} pts on Wave ${receipt.wave} (${receipt.defeated} emojis defeated)`,
+    ]);
+
     return {
       kind: 30078,
       created_at: receipt.createdAt,
-      tags: [
-        ['d', receipt.dTag],
-        ['t', 'mojisurvivor'],
-        ['p', ownerPubkey],
-        ['score', String(receipt.score)],
-        ['wave', String(receipt.wave)],
-        ['defeated', String(receipt.defeated)],
-        ['bosses', String(receipt.bossesDefeated)],
-        ['duration', String(receipt.durationSec)],
-        ['run_hash', receipt.runHash],
-        ['weapons', receipt.weaponsSummary],
-        ['client', 'mojisurvivor'],
-        [
-          'alt',
-          `MojiSurvivor run receipt: ${receipt.score.toLocaleString()} pts on Wave ${receipt.wave} (${receipt.defeated} emojis defeated)`,
-        ],
-      ],
+      tags,
       content: '',
     };
   }
@@ -2607,6 +2719,7 @@ export class MojiNostrCoordinator {
       mojoBalance: state.mojoBalance,
       lifetimeMojoEarned: state.lifetimeMojoEarned,
       lifetimeXpEarned: state.lifetimeXpEarned,
+      xpSpentOnRebirths: state.xpSpentOnRebirths ?? 0,
       playerLevel: state.playerLevel,
       rebirthCount: state.rebirthCount ?? 0,
       mojoSpentOnRebirths: state.mojoSpentOnRebirths ?? 0,
@@ -2622,6 +2735,17 @@ export class MojiNostrCoordinator {
       creditedRuns: ledgerMap,
     };
 
+    const statsSnapshot = buildPlayerStatsForAwards({
+      pubkey: this.pubkey.toLowerCase(),
+      persisted: state,
+      relayRuns: this.getVerifiedRunsForPubkey(this.pubkey),
+      localReceipts: state.localReceipts,
+    });
+    const awards = evaluatePlayerAwards(statsSnapshot);
+    const unlockedBadgeTags = awards
+      .filter((a) => a.unlocked)
+      .map((a) => ['badge', a.id]);
+
     return {
       kind: 30078,
       created_at: createdAtSec,
@@ -2631,14 +2755,23 @@ export class MojiNostrCoordinator {
         ['p', this.pubkey.toLowerCase()],
         ['schema', '3'],
         ['level', String(state.playerLevel)],
+        ['lifetime_xp', String(state.lifetimeXpEarned)],
         ['rebirth', String(state.rebirthCount ?? 0)],
         ['mojo', String(state.mojoBalance)],
+        ['lifetime_mojo', String(state.lifetimeMojoEarned)],
         ['high_score', String(state.highScore)],
+        ['lifetime_score', String(state.lifetimeScore ?? state.highScore)],
         ['best_wave', String(state.bestWave)],
+        ['total_kills', String(state.totalKills)],
+        ['total_bosses', String(state.totalBossKills ?? 0)],
+        ['total_runs', String(state.totalRuns)],
+        ['codex_count', String(Object.keys(codexMap).length)],
+        ['fav_weapon', statsSnapshot.signatureWeapon],
+        ...unlockedBadgeTags,
         ['client', 'mojisurvivor'],
         [
           'alt',
-          `MojiSurvivor progression save: Player Level ${state.playerLevel}${
+          `MojiSurvivor progression save: Cycle Lv.${state.playerLevel}${
             (state.rebirthCount ?? 0) > 0 ? ` (Rebirth ${state.rebirthCount})` : ''
           }, Best Score ${state.highScore.toLocaleString()}`,
         ],
@@ -2965,5 +3098,243 @@ export class MojiNostrCoordinator {
         );
       })
       .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  /**
+   * Groups all verified Kind 30078 run receipts by pubkey and merges any published
+   * `mojisurvivor:progress:v1` snapshot so the Leaderboard can rank players by either
+   * All-Time Career Totals (cumulative score, total kills, total bosses, total runs)
+   * OR Best Single Run for each metric, while exposing each player's full Run History.
+   */
+  public getPlayerLeaderboardAggregates(
+    localState?: PersistedGameState
+  ): PlayerLeaderboardAggregate[] {
+    const runsByPubkey = new Map<string, VerifiedLeaderboardEntry[]>();
+
+    for (const entry of this.leaderboard.values()) {
+      const addr = `30078:${entry.pubkey}:${entry.dTag}`;
+      if (this.deletedEventIds.has(entry.eventId) || this.deletedAddresses.has(addr)) {
+        continue;
+      }
+      const list = runsByPubkey.get(entry.pubkey) ?? [];
+      list.push(entry);
+      runsByPubkey.set(entry.pubkey, list);
+    }
+
+    const aggregates: PlayerLeaderboardAggregate[] = [];
+
+    for (const [pubkey, rawRuns] of runsByPubkey.entries()) {
+      // Deduplicate by dTag in case multiple relays returned the same addressable run
+      const byDTag = new Map<string, VerifiedLeaderboardEntry>();
+      for (const r of rawRuns) {
+        const key = r.dTag || r.eventId;
+        const prev = byDTag.get(key);
+        if (!prev || r.score > prev.score || r.createdAt > prev.createdAt) {
+          byDTag.set(key, r);
+        }
+      }
+      const runs = Array.from(byDTag.values()).sort(
+        (a, b) => b.createdAt - a.createdAt || b.score - a.score
+      );
+      if (runs.length === 0) continue;
+
+      let bestScoreRun = runs[0];
+      let bestWaveRun = runs[0];
+      let mostDefeatedRun = runs[0];
+      let mostBossesRun = runs[0];
+
+      let sumScore = 0;
+      let sumDefeated = 0;
+      let sumBosses = 0;
+      let latestRunAt = 0;
+
+      for (const r of runs) {
+        sumScore += r.score;
+        sumDefeated += r.defeated;
+        sumBosses += r.bosses;
+        if (r.createdAt > latestRunAt) latestRunAt = r.createdAt;
+
+        if (r.score > bestScoreRun.score || (r.score === bestScoreRun.score && r.wave > bestScoreRun.wave)) {
+          bestScoreRun = r;
+        }
+        if (r.wave > bestWaveRun.wave || (r.wave === bestWaveRun.wave && r.score > bestWaveRun.score)) {
+          bestWaveRun = r;
+        }
+        if (r.defeated > mostDefeatedRun.defeated || (r.defeated === mostDefeatedRun.defeated && r.score > mostDefeatedRun.score)) {
+          mostDefeatedRun = r;
+        }
+        if (r.bosses > mostBossesRun.bosses || (r.bosses === mostBossesRun.bosses && r.score > mostBossesRun.score)) {
+          mostBossesRun = r;
+        }
+      }
+
+      const snap =
+        localState && pubkey === this.pubkey.toLowerCase()
+          ? localState
+          : this.remoteProgressSnapshots.get(pubkey);
+
+      const careerTotalScore = Math.max(snap?.lifetimeScore ?? 0, sumScore);
+      const careerTotalDefeated = Math.max(snap?.totalKills ?? 0, sumDefeated);
+      const careerTotalBosses = Math.max(snap?.totalBossKills ?? 0, sumBosses);
+      const careerRunCount = Math.max(snap?.totalRuns ?? 0, runs.length);
+
+      aggregates.push({
+        pubkey,
+        npub: encodeFullNpub(pubkey),
+        runs,
+        bestScoreRun: { ...bestScoreRun, playerRunCount: runs.length },
+        bestWaveRun: { ...bestWaveRun, playerRunCount: runs.length },
+        mostDefeatedRun: { ...mostDefeatedRun, playerRunCount: runs.length },
+        mostBossesRun: { ...mostBossesRun, playerRunCount: runs.length },
+        careerTotalScore,
+        careerTotalDefeated,
+        careerTotalBosses,
+        careerRunCount,
+        bestScore: Math.max(snap?.highScore ?? 0, bestScoreRun.score),
+        bestWave: Math.max(snap?.bestWave ?? 1, bestWaveRun.wave),
+        bestSingleDefeated: mostDefeatedRun.defeated,
+        bestSingleBosses: mostBossesRun.bosses,
+        latestRunAt,
+        progressSnapshot: snap,
+      });
+    }
+
+    return aggregates.sort(
+      (a, b) => b.bestScore - a.bestScore || b.careerTotalScore - a.careerTotalScore
+    );
+  }
+
+  /**
+   * Aggregates NIP-30 and Reserve emojis across live relay packs, local Codex records,
+   * remote players' public `mojisurvivor:progress:v1` Codex snapshots, and run `featured_emoji` tags
+   * to build the Moji Leaderboard with Rarity Graphics and silly superlatives.
+   */
+  public getMojiLeaderboard(
+    localCodex?: Record<string, CodexKillRecord>
+  ): AggregatedMojiLeaderboardEntry[] {
+    const map = new Map<
+      string,
+      {
+        emojiKey: string;
+        shortcode: string;
+        url: string;
+        source: 'nip30' | 'reserve';
+        tier: string;
+        behavior: string;
+        powerRating: number;
+        packTitle: string;
+        packAuthor?: string;
+        hash?: string;
+        totalKills: number;
+        timesFeatured: number;
+        slainByPlayers: Set<string>;
+      }
+    >();
+
+    const upsertTrait = (trait: EmojiCombatTrait) => {
+      if (!this.isEmojiAllowed(trait)) return;
+      if (this.imageStatus.get(trait.url) === 'broken') return;
+      const existing = map.get(trait.emojiKey);
+      if (!existing) {
+        map.set(trait.emojiKey, {
+          emojiKey: trait.emojiKey,
+          shortcode: trait.shortcode,
+          url: trait.url,
+          source: trait.source,
+          tier: trait.tier,
+          behavior: trait.behaviorName,
+          powerRating: trait.powerRating,
+          packTitle: trait.packTitle || 'NIP-30 Pack',
+          packAuthor: trait.packAuthor,
+          hash: trait.hash,
+          totalKills: 0,
+          timesFeatured: 0,
+          slainByPlayers: new Set<string>(),
+        });
+      }
+    };
+
+    for (const trait of this.emojis.values()) {
+      upsertTrait(trait);
+    }
+
+    const ingestCodexMap = (
+      codex: Record<string, CodexKillRecord> | undefined,
+      ownerKey: string
+    ) => {
+      if (!codex) return;
+      for (const rec of Object.values(codex)) {
+        if (!rec || !rec.url || rec.kills <= 0) continue;
+        const trait = codexRecordToTrait(rec);
+        if (!this.isEmojiAllowed(trait)) continue;
+        upsertTrait(trait);
+        const item = map.get(trait.emojiKey);
+        if (item) {
+          item.totalKills += rec.kills;
+          item.slainByPlayers.add(ownerKey);
+        }
+      }
+    };
+
+    ingestCodexMap(localCodex, this.pubkey || 'local');
+
+    for (const [pk, snap] of this.remoteProgressSnapshots.entries()) {
+      if (localCodex && pk.toLowerCase() === this.pubkey.toLowerCase()) continue;
+      ingestCodexMap(snap.codex, pk.toLowerCase());
+    }
+
+    for (const run of this.leaderboard.values()) {
+      if (run.featuredEmoji) {
+        const feat = run.featuredEmoji;
+        const existing = map.get(feat.emojiKey);
+        if (existing) {
+          existing.timesFeatured += 1;
+          existing.slainByPlayers.add(run.pubkey);
+          if (existing.totalKills === 0) {
+            existing.totalKills += Math.max(1, Math.round(run.defeated / 12));
+          }
+        }
+      }
+    }
+
+    const rawList = Array.from(map.values()).sort(
+      (a, b) =>
+        b.totalKills - a.totalKills ||
+        b.timesFeatured - a.timesFeatured ||
+        b.powerRating - a.powerRating
+    );
+
+    return rawList.map((item, idx) => {
+      const rarity = determineMojiRarity({
+        tier: item.tier,
+        powerRating: item.powerRating,
+        totalKills: item.totalKills,
+        timesFeatured: item.timesFeatured,
+      });
+      const superlative = getMojiSillySuperlative(idx, {
+        totalKills: item.totalKills,
+        timesFeatured: item.timesFeatured,
+        powerRating: item.powerRating,
+        tier: item.tier,
+        behavior: item.behavior,
+      });
+      return {
+        emojiKey: item.emojiKey,
+        shortcode: item.shortcode,
+        url: item.url,
+        source: item.source,
+        tier: item.tier,
+        behavior: item.behavior,
+        powerRating: item.powerRating,
+        packTitle: item.packTitle,
+        packAuthor: item.packAuthor,
+        hash: item.hash,
+        totalKills: item.totalKills,
+        timesFeatured: item.timesFeatured,
+        slainByPlayersCount: item.slainByPlayers.size,
+        rarity,
+        superlative,
+      };
+    });
   }
 }

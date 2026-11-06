@@ -3,6 +3,7 @@ import { Check, AlertCircle, ArrowRight, Sparkles, Flame } from 'lucide-react';
 import {
   computeTotalUpgradeLevels,
   getUpgradeCost,
+  MAX_TOTAL_UPGRADE_LEVELS,
   UPGRADE_SPECS,
   type UpgradeLevels,
   type UpgradeSpec,
@@ -26,6 +27,7 @@ interface UpgradeLabViewProps {
   playerLevel: number;
   playerXp: number;
   playerXpNext: number;
+  lifetimeXpEarned?: number;
   rebirthCount?: number;
   upgrades: UpgradeLevels;
   onPurchaseUpgrade: (spec: UpgradeSpec) => UpgradePurchaseResult;
@@ -37,6 +39,7 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
   playerLevel,
   playerXp,
   playerXpNext,
+  lifetimeXpEarned = 0,
   rebirthCount = 0,
   upgrades,
   onPurchaseUpgrade,
@@ -80,7 +83,7 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
     if (res.ok) {
       setFeedback({
         type: 'success',
-        message: `Career Rebirth Tier ${res.newRebirthCount} unlocked! Permanent +${res.newRebirthCount * 15}% DMG, +${res.newRebirthCount * 12}% Mojo Bounty, +${res.newRebirthCount * 10}% Max Hull, and +${res.newRebirthCount * 6}% Haste active.`,
+        message: `Career Rebirth Tier ${res.newRebirthCount} unlocked! Cycle Level reset to Lv.1 (Lifetime XP preserved). Permanent +${res.newRebirthCount * 15}% DMG, +${res.newRebirthCount * 12}% Mojo Bounty, +${res.newRebirthCount * 10}% Max Hull, and +${res.newRebirthCount * 6}% Haste active.`,
       });
     } else {
       setFeedback({
@@ -109,15 +112,23 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
             </div>
           )}
           <div>
-            <span className="text-xs text-[#B8B8B8]">Player Lv: </span>
+            <span className="text-xs text-[#B8B8B8]">Cycle Lv: </span>
             <span className="font-bold text-[#FFB6D9]">Lv.{playerLevel}</span>
             <span className="text-xs text-[#5E5E5E]">
               {' '}({playerXp}/{playerXpNext})
             </span>
           </div>
+          {lifetimeXpEarned > 0 && (
+            <div>
+              <span className="text-xs text-[#B8B8B8]">Lifetime XP: </span>
+              <span className="font-bold text-[#E2E8F0]">
+                {lifetimeXpEarned.toLocaleString()}
+              </span>
+            </div>
+          )}
           <div>
             <span className="text-xs text-[#B8B8B8]">Mojo Available: </span>
-            <span className="font-bold text-[#FFD700]">
+            <span className="font-bold text-[#FF1493]">
               {mojoBalance.toLocaleString()} Mojo
             </span>
           </div>
@@ -164,11 +175,16 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
             </span>
           </div>
           <p className="text-xs text-[#B8B8B8] leading-relaxed">
-            Reset your 5 Upgrade Lab tracks to Lv.0 at{' '}
-            <span className="text-white font-semibold">Career Player Lv.20+</span> (or{' '}
+            Reset your 5 Upgrade Lab tracks to Lv.0 and Cycle Level to{' '}
+            <span className="text-white font-semibold">Lv.1</span> at{' '}
+            <span className="text-white font-semibold">Cycle Player Lv.20+</span> (or{' '}
             <span className="text-white font-semibold">15+ total upgrade levels</span>, currently{' '}
-            <span className="font-mono text-[#FFB6D9]">{totalUpgradeLevels}/25</span>) in exchange for a permanent, stackable{' '}
-            <span className="text-[#00F0FF] font-semibold">Rebirth Tier</span>. Your unspent Mojo, Career Player Level, and Codex unlocks are preserved.
+            <span className="font-mono text-[#FFB6D9]">
+              {totalUpgradeLevels}/{MAX_TOTAL_UPGRADE_LEVELS}
+            </span>
+            ) in exchange for a permanent, stackable{' '}
+            <span className="text-[#00F0FF] font-semibold">Rebirth Tier</span>. Your unspent Mojo,
+            all-time Lifetime XP, and Codex unlocks are preserved.
           </p>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono tabular-nums text-[#C0C0C0] pt-0.5">
             <span>
@@ -177,7 +193,7 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
             </span>
             <span>·</span>
             <span>
-              <strong className="text-[#FFD700]">+{(rebirthCount + 1) * 12}% Mojo Bounty</strong>
+              <strong className="text-[#E2E8F0]">+{(rebirthCount + 1) * 12}% Mojo Bounty</strong>
             </span>
             <span>·</span>
             <span>
@@ -215,9 +231,9 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
             <Sparkles className="w-3.5 h-3.5" />
             <span>
               {!canRebirth
-                ? `Locked (Need Lv.20 or 15 Upgr)`
+                ? `Locked (Need Cycle Lv.20 or 15 Upgr)`
                 : confirmRebirth
-                  ? `Confirm Rebirth → Tier ${rebirthCount + 1}`
+                  ? `Confirm Rebirth → Tier ${rebirthCount + 1} (Reset to Lv.1)`
                   : `Ascend to Rebirth Tier ${rebirthCount + 1}`}
             </span>
           </button>

@@ -36,6 +36,7 @@ import {
   loadActiveRunCheckpoint,
   loadPendingPostRunSession,
   loadPersistedStateWithDiagnostics,
+  mergeOwnRelayRunsIntoState,
   performCareerRebirth,
   reconcileProgressionStates,
   saveActiveRunCheckpoint,
@@ -1319,6 +1320,26 @@ export default function App() {
     [coordinator, nostrTick]
   );
 
+  // Automatically merge the active user's own verified historical relay runs into local best score, wave, and career totals
+  useEffect(() => {
+    if (myRelayRuns.length === 0) return;
+    commitPersisted((prev) => mergeOwnRelayRunsIntoState(prev, myRelayRuns), {
+      immediate: true,
+    });
+  }, [commitPersisted, myRelayRuns]);
+
+  const playerAggregates = useMemo(
+    () => coordinator.getPlayerLeaderboardAggregates(persisted),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [coordinator, nostrTick, persisted]
+  );
+
+  const mojiLeaderboard = useMemo(
+    () => coordinator.getMojiLeaderboard(persisted.codex),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [coordinator, nostrTick, persisted.codex]
+  );
+
   const activeProfile = coordinator.profiles.get(coordinator.pubkey);
   const discoveredCount = Object.values(persisted.codex).filter((r) => r.kills > 0).length;
   const totalKnownCodexCount = useMemo(() => {
@@ -1638,7 +1659,7 @@ export default function App() {
               </div>
               <div>
                 <div className="text-xs text-[#B8B8B8] truncate">Mojo Banked</div>
-                <div className="text-sm sm:text-lg font-bold text-[#FFD700]">
+                <div className="text-sm sm:text-lg font-bold text-[#E2E8F0]">
                   {persisted.mojoBalance.toLocaleString()}
                 </div>
               </div>
@@ -1753,6 +1774,7 @@ export default function App() {
             playerLevel={persisted.playerLevel}
             playerXp={persisted.playerXp}
             playerXpNext={persisted.playerXpNext}
+            lifetimeXpEarned={persisted.lifetimeXpEarned}
             rebirthCount={persisted.rebirthCount}
             upgrades={persisted.upgrades}
             onPurchaseUpgrade={handlePurchaseUpgrade}
@@ -1787,6 +1809,9 @@ export default function App() {
           <LeaderboardView
             coordinator={coordinator}
             entries={sortedLeaderboard}
+            playerAggregates={playerAggregates}
+            mojiLeaderboard={mojiLeaderboard}
+            persistedState={persisted}
             myRelayRuns={myRelayRuns}
             profiles={coordinator.profiles}
             localReceipts={persisted.localReceipts}
@@ -1801,6 +1826,7 @@ export default function App() {
               totalBossKills: persisted.totalBossKills ?? 0,
               lifetimeMojoEarned: persisted.lifetimeMojoEarned,
               rebirthCount: persisted.rebirthCount ?? 0,
+              lifetimeXpEarned: persisted.lifetimeXpEarned,
             }}
             defaultAvatarUrl={defaultAvatarUrl}
             relayCount={persisted.relays.length}
@@ -1823,6 +1849,8 @@ export default function App() {
             playerXp={persisted.playerXp}
             playerXpNext={persisted.playerXpNext}
             mojoBalance={persisted.mojoBalance}
+            persistedState={persisted}
+            myRelayRuns={myRelayRuns}
             progressSync={persisted.progressSync}
             storageError={storageError}
             relays={persisted.relays}
