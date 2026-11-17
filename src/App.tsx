@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, ChevronRight, RotateCcw, AlertTriangle, ArrowRight } from 'lucide-react';
+import { Play, RotateCcw, AlertTriangle, ArrowRight } from 'lucide-react';
 import { ArenaView } from './components/ArenaView';
 import { CodexView } from './components/CodexView';
 import { FirstLoadWarningModal } from './components/FirstLoadWarningModal';
@@ -26,7 +26,6 @@ import {
 } from './lib/moderationLists';
 import { formatShortNpub, MojiNostrCoordinator } from './lib/nostrEngine';
 import {
-  ARENA_PIXEL_BG_OPTIONS,
   getLobbyPixelBannerDataUrl,
   MOJI_APP_ICON_URL,
 } from './lib/pixelBackgrounds';
@@ -1381,7 +1380,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-black text-white flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
+    <div className="min-h-screen bg-[#07070B] text-white flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
       {persisted.contentWarningAcceptedAt === null && (
         <FirstLoadWarningModal onAccept={handleAcceptContentWarning} />
       )}
@@ -1390,8 +1389,8 @@ export default function App() {
         <div className="pointer-events-none fixed inset-0 crt-scanlines opacity-30 z-40" />
       )}
 
-      {/* Compact Sticky Top Chrome — BreBre Colors UI Standards */}
-      <div className="sticky top-0 z-30 bg-[#000000] border-b border-[#9A0957]/45">
+      {/* Compact Sticky Top Chrome */}
+      <div className="sticky top-0 z-30 bg-[#07070B]/95 backdrop-blur-md border-b border-white/10">
         <header className="max-w-5xl mx-auto flex items-center justify-between gap-6 px-4 py-2">
           <button
             type="button"
@@ -1454,7 +1453,7 @@ export default function App() {
 
         <nav
           aria-label="Mobile navigation"
-          className="md:hidden grid grid-cols-5 border-t border-[#5B0633]/80 bg-[#111111] px-2"
+          className="md:hidden grid grid-cols-5 border-t border-white/10 bg-[#111018] px-2"
         >
           {(
             [
@@ -1509,18 +1508,18 @@ export default function App() {
       {/* Main Content Container */}
       <main className="flex-1 pb-16">
         {destination === 'lobby' && (
-          <section className="max-w-5xl mx-auto px-4 py-3.5 space-y-3">
-            {/* Hero Arena Card — BreBre Colors Pixel-Art Horizon + App Emblem */}
-            <div className="relative rounded-2xl overflow-hidden border border-[#9A0957]/65 bg-[#111111]">
+          <section className="max-w-5xl mx-auto px-4 py-4 space-y-3.5">
+            {/* Hero Launch Panel */}
+            <div className="relative rounded-2xl overflow-hidden border border-white/10 bg-[#111018]">
               {lobbyPixelBannerUrl && (
                 <img
                   src={lobbyPixelBannerUrl}
-                  alt="BreBre retro pixel-art arena horizon"
-                  className="absolute inset-0 w-full h-full object-cover opacity-55 pixelated"
+                  alt="16-bit pixel-art arena horizon"
+                  className="absolute inset-0 w-full h-full object-cover opacity-50 pixelated"
                 />
               )}
-              <div className="relative bg-gradient-to-r from-[#000000]/92 via-[#000000]/82 to-[#111111]/75 p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div className="space-y-2.5 max-w-xl">
+              <div className="relative bg-gradient-to-r from-[#07070B]/94 via-[#07070B]/84 to-[#111018]/78 p-5 sm:p-6 flex flex-col md:flex-row md:items-center justify-between gap-5">
+                <div className="space-y-3 max-w-xl">
                   <div className="flex items-center gap-3">
                     <div className="w-12 h-12 rounded-xl emoji-opaque-pod p-0.5 overflow-hidden shrink-0">
                       <img
@@ -1541,21 +1540,21 @@ export default function App() {
                             formatShortNpub(coordinator.pubkey)
                           : 'Guest Player'}
                       </div>
-                      <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono text-[#B8B8B8]">
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono text-[#94A3B8]">
                         <span className="text-[#FFB6D9] font-semibold">
-                          Player Lv.{persisted.playerLevel}
+                          Lv.{persisted.playerLevel}
                         </span>
-                        <span aria-hidden="true" className="text-[#5E5E5E]">·</span>
-                        <span className="text-[#C0C0C0]">
+                        <span aria-hidden="true">·</span>
+                        <span>
                           {isSignedIn ? coordinator.signerMode.toUpperCase() : 'Local Save'}
                         </span>
-                        <span aria-hidden="true" className="text-[#5E5E5E]">·</span>
+                        <span aria-hidden="true">·</span>
                         <button
                           type="button"
                           onClick={() => openAccountPanel('profile')}
                           className="text-[#FF1493] hover:text-[#FFB6D9] font-semibold inline-flex items-center gap-1 whitespace-nowrap"
                         >
-                          <span>{isSignedIn ? 'Cloud Save & Signer' : 'Sign In'}</span>
+                          <span>{isSignedIn ? 'Account' : 'Sign In'}</span>
                           <span aria-hidden="true">→</span>
                         </button>
                       </div>
@@ -1563,16 +1562,14 @@ export default function App() {
                   </div>
 
                   <div>
-                    <div className="w-8 h-1 rounded-full bg-[#FF1493] mb-1.5" />
                     <h1
                       className="text-xl sm:text-2xl font-display font-bold text-white tracking-tight leading-snug"
                       style={{ textWrap: 'balance' }}
                     >
-                      NIP-30 Custom Emoji Survivor Arena
+                      MojiSurvivor Arena
                     </h1>
-                    <p className="text-xs text-[#B8B8B8] mt-1 leading-relaxed">
-                      Drag anywhere or use WASD to battle cryptographically statted{' '}
-                      <code className="font-mono text-[#FFB6D9]">kind:30030</code> emojis on 16-bit BreBre pixel-art realms with opaque sprite contrast backing.
+                    <p className="text-xs sm:text-sm text-[#B8B8B8] mt-1 leading-relaxed">
+                      Move with mouse, touch, or WASD to battle statted Nostr emojis across 16-bit pixel arenas.
                     </p>
                   </div>
                 </div>
@@ -1599,7 +1596,7 @@ export default function App() {
                           handleSaveActiveRunCheckpoint(null);
                           navigateTo('arena', { checkpoint: null });
                         }}
-                        className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                        className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#0B0A12] border border-white/15 hover:border-[#FF1493] text-xs font-semibold text-white transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
                       >
                         <RotateCcw className="w-3.5 h-3.5 text-[#FFB6D9]" />
                         <span>New Run</span>
@@ -1619,7 +1616,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => navigateTo('upgrades')}
-                        className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] text-xs font-semibold text-white transition-colors whitespace-nowrap"
+                        className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#0B0A12] border border-white/15 hover:border-[#FF1493] text-xs font-semibold text-white transition-colors whitespace-nowrap"
                       >
                         Upgrades ({persisted.mojoBalance.toLocaleString()} Mojo)
                       </button>
@@ -1629,141 +1626,46 @@ export default function App() {
               </div>
             </div>
 
-            {/* 5-Metric Progression Strip — BreBre Colors Palette */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 py-2.5 px-3.5 rounded-xl bg-[#111111] border border-[#9A0957]/45 font-mono tabular-nums">
-              <div>
-                <div className="text-xs text-[#B8B8B8] truncate">Player Level</div>
-                <div className="text-sm sm:text-lg font-bold text-[#FF1493]">
+            {/* Single Horizontal Hairline Stat Strip */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-white/10 rounded-xl bg-[#111018] border border-white/10 font-mono tabular-nums">
+              <div className="px-4 py-3">
+                <div className="text-[11px] text-[#94A3B8] truncate">Player Level</div>
+                <div className="text-sm sm:text-base font-bold text-[#FF1493] mt-0.5">
                   Lv.{persisted.playerLevel}
                   {(persisted.rebirthCount ?? 0) > 0 && (
                     <span className="text-xs font-semibold text-[#00F0FF]">
                       {' '}· R{persisted.rebirthCount}
                     </span>
                   )}
-                  <span className="text-xs font-normal text-[#5E5E5E]">
-                    {' '}({persisted.playerXp}/{persisted.playerXpNext})
-                  </span>
                 </div>
               </div>
-              <div>
-                <div className="text-xs text-[#B8B8B8] truncate">Best Score</div>
-                <div className="text-sm sm:text-lg font-bold text-white">
+              <div className="px-4 py-3">
+                <div className="text-[11px] text-[#94A3B8] truncate">Best Score</div>
+                <div className="text-sm sm:text-base font-bold text-white mt-0.5">
                   {persisted.highScore.toLocaleString()}
                 </div>
               </div>
-              <div>
-                <div className="text-xs text-[#B8B8B8] truncate">Best Wave</div>
-                <div className="text-sm sm:text-lg font-bold text-[#FFB6D9]">
+              <div className="px-4 py-3">
+                <div className="text-[11px] text-[#94A3B8] truncate">Best Wave</div>
+                <div className="text-sm sm:text-base font-bold text-[#FFB6D9] mt-0.5">
                   W{persisted.bestWave}
                 </div>
               </div>
-              <div>
-                <div className="text-xs text-[#B8B8B8] truncate">Mojo Banked</div>
-                <div className="text-sm sm:text-lg font-bold text-[#E2E8F0]">
+              <div className="px-4 py-3">
+                <div className="text-[11px] text-[#94A3B8] truncate">Mojo Banked</div>
+                <div className="text-sm sm:text-base font-bold text-[#E2E8F0] mt-0.5">
                   {persisted.mojoBalance.toLocaleString()}
                 </div>
               </div>
-              <div className="col-span-2 sm:col-span-1">
-                <div className="text-xs text-[#B8B8B8] truncate">Emoji Pool</div>
-                <div className="text-sm sm:text-lg font-bold text-[#C0C0C0]">
-                  {totalKnownCodexCount}
-                  <span className="text-xs font-normal text-[#5E5E5E]">
+              <div className="col-span-2 sm:col-span-1 px-4 py-3">
+                <div className="text-[11px] text-[#94A3B8] truncate">Emoji Pool</div>
+                <div className="text-sm sm:text-base font-bold text-[#CBD5E1] mt-0.5">
+                  {discoveredCount}/{totalKnownCodexCount}
+                  <span className="text-xs font-normal text-[#64748B]">
                     {' '}({liveNip30Count} live)
                   </span>
                 </div>
               </div>
-            </div>
-
-            {/* Retro Pixel-Art Arena Realm Selector & Opaque Contrast Backing Toggle */}
-            <div className="p-3 rounded-xl bg-[#111111] border border-[#9A0957]/45 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-              <div className="min-w-0">
-                <div className="text-xs font-display font-bold text-white flex items-center gap-2">
-                  <span>16-Bit BreBre Pixel Arena Background</span>
-                  <span className="text-[11px] font-mono text-[#FFB6D9]">
-                    · Opaque Sprite Backing {persisted.settings.opaqueAssetBacking !== false ? 'ON' : 'OFF'}
-                  </span>
-                </div>
-                <p className="text-[11px] text-[#5E5E5E] truncate">
-                  Retro pixel-art tilemaps in the BreBre Colors palette with high-contrast opaque plates under dark/transparent emojis.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                {ARENA_PIXEL_BG_OPTIONS.map((opt) => {
-                  const active = (persisted.settings.arenaBgStyle ?? 'auto') === opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() =>
-                        handleUpdateSettings({
-                          ...persisted.settings,
-                          arenaBgStyle: opt.id,
-                        })
-                      }
-                      className={`min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                        active
-                          ? 'bg-[#FF1493] text-white font-semibold'
-                          : 'bg-[#000000] border border-[#5B0633] text-[#B8B8B8] hover:border-[#9A0957] hover:text-white'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Destination Cards — BreBre Colors Card Specimen */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-              <button
-                type="button"
-                onClick={() => navigateTo('codex')}
-                className="text-left px-4 py-3.5 rounded-xl bg-[#111111] border border-[#9A0957]/45 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3 group"
-              >
-                <div className="min-w-0">
-                  <div className="text-sm font-display font-bold text-white group-hover:text-[#FFB6D9] transition-colors truncate">
-                    Emoji Codex · {discoveredCount}/{totalKnownCodexCount}
-                  </div>
-                  <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
-                    Opaque contrast pods · SHA-256 hash unlocks
-                  </p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-[#FF1493] shrink-0" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => navigateTo('leaderboard')}
-                className="text-left px-4 py-3.5 rounded-xl bg-[#111111] border border-[#9A0957]/45 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3 group"
-              >
-                <div className="min-w-0">
-                  <div className="text-sm font-display font-bold text-white group-hover:text-[#FFB6D9] transition-colors truncate">
-                    Leaderboard · {sortedLeaderboard.length} verified
-                  </div>
-                  <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
-                    BIP-340 relay receipts & pixel PNG score cards
-                  </p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-[#FF1493] shrink-0" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => openAccountPanel('profile')}
-                className="text-left px-4 py-3.5 rounded-xl bg-[#111111] border border-[#9A0957]/45 hover:border-[#FF1493] transition-colors flex items-center justify-between gap-3 group"
-              >
-                <div className="min-w-0">
-                  <div className="text-sm font-display font-bold text-white group-hover:text-[#FFB6D9] transition-colors truncate">
-                    Profile, Cloud Save & Settings
-                  </div>
-                  <p className="text-xs text-[#B8B8B8] truncate mt-0.5">
-                    {isSignedIn
-                      ? `${activeProfile?.displayName || activeProfile?.name || 'Signed in'} · Sync ${persisted.progressSync.enabled ? 'ON' : 'OFF'}`
-                      : `Amber / NIP-46 Sign-In · ${persisted.relays.length} relays`}
-                  </p>
-                </div>
-                <ChevronRight className="w-4 h-4 text-[#FF1493] shrink-0" />
-              </button>
             </div>
           </section>
         )}

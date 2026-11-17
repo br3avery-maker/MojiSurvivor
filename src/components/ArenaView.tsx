@@ -455,7 +455,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
             </div>
             <div>
               <div className="text-[10px] text-[#B8B8B8]">Mojo</div>
-              <div className="text-sm sm:text-base font-semibold text-[#FFD700]">
+              <div className="text-sm sm:text-base font-semibold text-[#E2E8F0]">
                 +{hud.mojoEarned}
               </div>
             </div>
@@ -687,7 +687,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
               </div>
               <div>
                 <div className="text-[10px] text-[#B8B8B8]">Mojo Banked</div>
-                <div className="text-sm font-bold text-[#FFD700]">
+                <div className="text-sm font-bold text-[#E2E8F0]">
                   +{completedSummary.mojoEarned}
                 </div>
               </div>

@@ -11,7 +11,6 @@ import {
   Trophy,
   ChevronDown,
 } from 'lucide-react';
-import { buildPlayerStatsForAwards } from '../lib/awardsAndCards';
 import {
   formatShortNpub,
   type AggregatedMojiLeaderboardEntry,
@@ -21,7 +20,7 @@ import {
   type VerifiedLeaderboardEntry,
 } from '../lib/nostrEngine';
 import type { PersistedGameState, RunReceiptRecord } from '../lib/storage';
-import { MojiRarityCard, PlayerTradingCard } from './PlayerTradingCard';
+import { MojiRarityCard } from './PlayerTradingCard';
 import { ScoreCardPanel } from './ScoreCardPanel';
 
 export interface CareerLifetimeTotals {
@@ -108,7 +107,6 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   localReceipts,
   currentPubkey,
   playerLevel,
-  careerStats,
   defaultAvatarUrl,
   relayCount,
   syncing,
@@ -118,7 +116,6 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   onDeleteReceipt,
 }) => {
   const [tab, setTab] = useState<'global' | 'mojis' | 'local'>('global');
-  const [rankingScope, setRankingScope] = useState<'career' | 'single'>('career');
   const [sortMode, setSortMode] = useState<LeaderboardSortMode>('career_score');
   const [mojiSortMode, setMojiSortMode] = useState<MojiSortMode>('slain');
   const [expandedPubkey, setExpandedPubkey] = useState<string | null>(null);
@@ -223,15 +220,6 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   const totalMyRuns =
     combinedMyRuns.localReceipts.length + combinedMyRuns.remoteOnly.length;
 
-  const handleScopeSwitch = (nextScope: 'career' | 'single') => {
-    setRankingScope(nextScope);
-    if (nextScope === 'career') {
-      setSortMode('career_score');
-    } else {
-      setSortMode('best_score');
-    }
-  };
-
   const handleBroadcastClick = async (rec: RunReceiptRecord) => {
     if (coordinator.signerMode === 'nip55' && !rec.signedEvent) {
       setNip55DrawerId((prev) => (prev === rec.localId ? null : rec.localId));
@@ -306,22 +294,19 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
   };
 
   return (
-    <section className="max-w-5xl mx-auto px-4 py-3.5 space-y-3">
-      {/* Header & Honest Cryptographic Verification Notice */}
-      <div className="flex flex-wrap items-start justify-between gap-3 pb-2.5 border-b border-[#9A0957]/45">
+    <section className="max-w-5xl mx-auto px-4 py-4 space-y-3.5">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/10">
         <div className="min-w-0 space-y-0.5">
-          <div className="w-7 h-1 rounded-full bg-[#FF1493] mb-1" />
           <h1 className="text-lg sm:text-xl font-display font-bold text-white tracking-tight">
-            Relay Leaderboards, Run History &amp; Moji Hall of Fame
+            Ranks &amp; Hall of Fame
           </h1>
-          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#B8B8B8]">
-            <span>Historical Kind 30078 aggregation</span>
-            <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums text-[#FFB6D9]">
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#94A3B8]">
+            <span className="font-mono tabular-nums text-[#E2E8F0]">
               {playerAggregates.length || entries.length} survivors
             </span>
             <span aria-hidden="true">·</span>
-            <span>BIP-340 Schnorr verified authorship</span>
+            <span>BIP-340 Schnorr verified runs</span>
           </div>
         </div>
 
@@ -329,7 +314,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
           type="button"
           onClick={onRefreshRelays}
           disabled={syncing}
-          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#000000] border border-[#9A0957] hover:border-[#FF1493] disabled:opacity-50 text-xs font-semibold text-white transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#111018] border border-white/15 hover:border-[#FF1493] disabled:opacity-50 text-xs font-semibold text-white transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
         >
           <RefreshCw
             className={`w-3.5 h-3.5 text-[#FFB6D9] ${syncing ? 'animate-spin' : ''}`}
@@ -338,53 +323,17 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         </button>
       </div>
 
-      {/* Career Lifetime Totals Strip (No Gold — Chrome Silver & Neon Accents) */}
-      {careerStats && (
-        <div className="grid grid-cols-2 sm:grid-cols-6 gap-2.5 p-3 rounded-xl bg-[#111111] border border-[#9A0957]/45 font-mono tabular-nums">
-          <div>
-            <div className="text-[11px] text-[#B8B8B8] truncate">Lifetime Score</div>
-            <div className="text-sm font-bold text-[#FF1493]">
-              {careerStats.lifetimeScore.toLocaleString()}
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-[#B8B8B8] truncate">Best Single Run</div>
-            <div className="text-sm font-bold text-white">
-              {careerStats.highScore.toLocaleString()} (W{careerStats.bestWave})
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-[#B8B8B8] truncate">Total Defeated</div>
-            <div className="text-sm font-bold text-[#FFB6D9]">
-              {careerStats.totalKills.toLocaleString()}
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-[#B8B8B8] truncate">Apex Bosses</div>
-            <div className="text-sm font-bold text-[#00F0FF]">
-              {careerStats.totalBossKills.toLocaleString()}
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-[#B8B8B8] truncate">Lifetime Mojo</div>
-            <div className="text-sm font-bold text-[#E2E8F0]">
-              {careerStats.lifetimeMojoEarned.toLocaleString()}
-            </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-[#B8B8B8] truncate">Rebirth · Runs</div>
-            <div className="text-sm font-bold text-[#00F5D4]">
-              Tier {careerStats.rebirthCount} · {careerStats.totalRuns}x
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Top View Tabs: Player Ranks | Moji Leaderboard | My Receipts */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-[#111111] border border-[#9A0957]/55">
+      {/* Single-Row Toolbar: Segmented View Switcher + Compact Sort Select */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div
+          role="tablist"
+          aria-label="Leaderboard sections"
+          className="inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-[#111018] border border-white/10"
+        >
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === 'global'}
             onClick={() => setTab('global')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
               tab === 'global'
@@ -393,11 +342,13 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
             }`}
           >
             <Trophy className="w-3.5 h-3.5" />
-            <span>Player Ranks ({sortedAggregates.length})</span>
+            <span>Survivors ({sortedAggregates.length})</span>
           </button>
 
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === 'mojis'}
             onClick={() => setTab('mojis')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
               tab === 'mojis'
@@ -406,11 +357,13 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Moji Leaderboard ({mojiEntries.length})</span>
+            <span>Moji Hall of Fame ({mojiEntries.length})</span>
           </button>
 
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === 'local'}
             onClick={() => setTab('local')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
               tab === 'local'
@@ -418,98 +371,45 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                 : 'text-[#B8B8B8] hover:text-white'
             }`}
           >
-            My Receipts ({totalMyRuns})
+            My Runs ({totalMyRuns})
           </button>
         </div>
 
-        {/* Sub-filters for Player Ranks */}
         {tab === 'global' && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <div className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#111111] border border-white/15">
-              <button
-                type="button"
-                onClick={() => handleScopeSwitch('career')}
-                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                  rankingScope === 'career'
-                    ? 'bg-[#00F0FF]/20 text-[#00F0FF] border border-[#00F0FF]/50'
-                    : 'text-[#B8B8B8] hover:text-white'
-                }`}
-              >
-                All-Time Career
-              </button>
-              <button
-                type="button"
-                onClick={() => handleScopeSwitch('single')}
-                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                  rankingScope === 'single'
-                    ? 'bg-[#00F0FF]/20 text-[#00F0FF] border border-[#00F0FF]/50'
-                    : 'text-[#B8B8B8] hover:text-white'
-                }`}
-              >
-                Best Single Run
-              </button>
-            </div>
-
-            <div
-              role="group"
-              aria-label="Sort leaderboard rankings"
-              className="inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-[#111111] border border-white/10"
+          <label className="inline-flex items-center gap-2 text-xs text-[#94A3B8]">
+            <span className="hidden sm:inline font-medium">Sort:</span>
+            <select
+              aria-label="Sort survivor rankings"
+              value={sortMode}
+              onChange={(e) => setSortMode(e.target.value as LeaderboardSortMode)}
+              className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#111018] border border-white/15 hover:border-white/30 text-xs font-semibold text-white focus:outline-none focus:border-[#FF1493]"
             >
-              {(rankingScope === 'career'
-                ? ([
-                    ['career_score', 'Cumulative Score'],
-                    ['career_defeated', 'Total Defeated'],
-                    ['career_bosses', 'Total Bosses'],
-                    ['career_runs', 'Most Runs'],
-                  ] as const)
-                : ([
-                    ['best_score', 'Best Score'],
-                    ['best_wave', 'Highest Wave'],
-                    ['best_defeated', 'Most Defeated'],
-                    ['best_bosses', 'Boss Slayers'],
-                  ] as const)
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setSortMode(key)}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                    sortMode === key
-                      ? 'bg-[#5B0633] text-white border border-[#FF1493]/60'
-                      : 'text-[#B8B8B8] hover:text-white'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
+              <option value="career_score">Career Score</option>
+              <option value="best_score">Best Single Run</option>
+              <option value="best_wave">Highest Wave</option>
+              <option value="career_bosses">Career Bosses</option>
+              <option value="career_defeated">Total Defeated</option>
+              <option value="career_runs">Most Runs</option>
+              <option value="best_defeated">Single Run Kills</option>
+              <option value="best_bosses">Single Run Bosses</option>
+            </select>
+          </label>
         )}
 
-        {/* Sub-filters for Moji Leaderboard */}
         {tab === 'mojis' && (
-          <div className="inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-[#111111] border border-white/10">
-            {(
-              [
-                ['slain', 'Most Slain'],
-                ['featured', 'Featured in Top Runs'],
-                ['power', 'Mythic Power Rating'],
-              ] as const satisfies readonly [MojiSortMode, string][]
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setMojiSortMode(key)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                  mojiSortMode === key
-                    ? 'bg-[#5B0633] text-white border border-[#FF1493]/60'
-                    : 'text-[#B8B8B8] hover:text-white'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <label className="inline-flex items-center gap-2 text-xs text-[#94A3B8]">
+            <span className="hidden sm:inline font-medium">Sort:</span>
+            <select
+              aria-label="Sort Moji leaderboard"
+              value={mojiSortMode}
+              onChange={(e) => setMojiSortMode(e.target.value as MojiSortMode)}
+              className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#111018] border border-white/15 hover:border-white/30 text-xs font-semibold text-white focus:outline-none focus:border-[#FF1493]"
+            >
+              <option value="slain">Most Slain</option>
+              <option value="featured">Top Featured</option>
+              <option value="power">Power Rating</option>
+            </select>
+          </label>
         )}
       </div>
 
@@ -534,11 +434,11 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         </div>
       )}
 
-      {/* TAB 1: GLOBAL PLAYER RANKS (WITH EXPANDABLE TRADING CARD + FULL RUN HISTORY) */}
+      {/* TAB 1: GLOBAL PLAYER RANKS */}
       {tab === 'global' && (
         <>
           {sortedAggregates.length === 0 ? (
-            <div className="py-10 px-4 text-center rounded-xl bg-[#111111] border border-white/10">
+            <div className="py-10 px-4 text-center rounded-xl bg-[#111018] border border-white/10">
               <p className="text-xs text-white font-medium">
                 {syncing
                   ? 'Verifying BIP-340 run receipts and career histories across relays…'
@@ -546,7 +446,7 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-[#5B0633]/70 rounded-xl bg-[#111111] border border-[#9A0957]/55 overflow-hidden">
+            <div className="divide-y divide-white/10 rounded-xl bg-[#111018] border border-white/10 overflow-hidden">
               {sortedAggregates.slice(0, 50).map((agg, idx) => {
                 const prof = profiles.get(agg.pubkey);
                 const isCurrentUser = agg.pubkey === currentPubkey;
@@ -639,10 +539,10 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                               prev === agg.pubkey ? null : agg.pubkey
                             )
                           }
-                          className="min-h-[34px] px-2.5 py-1 rounded-lg bg-black border border-white/15 hover:border-[#00F0FF] text-xs font-semibold text-white inline-flex items-center gap-1 transition-colors"
+                          className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#0B0A12] border border-white/15 hover:border-[#00F0FF] text-xs font-semibold text-white inline-flex items-center gap-1 transition-colors"
                         >
                           <History className="w-3.5 h-3.5 text-[#00F0FF]" />
-                          <span className="hidden sm:inline">Card &amp; History</span>
+                          <span className="hidden sm:inline">Run History</span>
                           <ChevronDown
                             className={`w-3.5 h-3.5 text-[#B8B8B8] transition-transform ${
                               isExpanded ? 'rotate-180 text-[#FF1493]' : ''
@@ -652,36 +552,42 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Expanded Drawer: Survivor Trading Card + Silly Awards + Chronological Run History */}
+                    {/* Expanded Drawer: Clean Hairline Career Summary + Chronological Run History (No Nested Cards) */}
                     {isExpanded && (
-                      <div className="mt-3 pt-3 border-t border-white/10 space-y-3">
-                        <PlayerTradingCard
-                          stats={buildPlayerStatsForAwards({
-                            pubkey: agg.pubkey,
-                            persisted:
-                              isCurrentUser && persistedState
-                                ? persistedState
-                                : agg.progressSnapshot,
-                            relayRuns: agg.runs,
-                            localReceipts: isCurrentUser ? localReceipts : [],
-                          })}
-                          profile={prof}
-                          defaultAvatarUrl={defaultAvatarUrl}
-                        />
+                      <div className="mt-3 pt-3 border-t border-white/10 space-y-2.5">
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs font-mono tabular-nums text-[#CBD5E1]">
+                          <span>
+                            Career{' '}
+                            <strong className="text-[#FF1493]">
+                              {agg.careerTotalScore.toLocaleString()}
+                            </strong>{' '}
+                            pts
+                          </span>
+                          <span>
+                            Best{' '}
+                            <strong className="text-white">
+                              {agg.bestScore.toLocaleString()}
+                            </strong>{' '}
+                            (W{agg.bestWave})
+                          </span>
+                          <span>
+                            Defeated{' '}
+                            <strong className="text-[#FFB6D9]">
+                              {agg.careerTotalDefeated.toLocaleString()}
+                            </strong>
+                          </span>
+                          <span>
+                            Bosses{' '}
+                            <strong className="text-[#00F0FF]">
+                              {agg.careerTotalBosses.toLocaleString()}
+                            </strong>
+                          </span>
+                          <span className="text-[#94A3B8] ml-auto">
+                            {agg.runs.length} signed run{agg.runs.length === 1 ? '' : 's'} · kind:30078
+                          </span>
+                        </div>
 
-                        {/* Chronological Signed Run History List */}
-                        <div className="p-3 rounded-xl bg-black/80 border border-white/10 space-y-2">
-                          <div className="flex items-center justify-between gap-2 text-xs font-display font-bold text-white">
-                            <span>
-                              Verified Relay Run History ({agg.runs.length} Signed Event
-                              {agg.runs.length === 1 ? '' : 's'})
-                            </span>
-                            <span className="text-[11px] font-mono text-[#94A3B8]">
-                              kind:30078 · #t:mojisurvivor
-                            </span>
-                          </div>
-
-                          <div className="divide-y divide-white/10 max-h-64 overflow-y-auto">
+                        <div className="divide-y divide-white/10 max-h-64 overflow-y-auto border-t border-white/10">
                             {agg.runs.map((runItem, rIdx) => {
                               const showRaw = inspectedEventId === runItem.eventId;
                               return (
@@ -762,7 +668,6 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                                 </div>
                               );
                             })}
-                          </div>
                         </div>
                       </div>
                     )}
@@ -774,16 +679,14 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         </>
       )}
 
-      {/* TAB 2: MOJI LEADERBOARD WITH COLLECTIBLE RARITY CARDS */}
+      {/* TAB 2: MOJI HALL OF FAME WITH COLLECTIBLE RARITY CARDS */}
       {tab === 'mojis' && (
         <div className="space-y-3">
-          <div className="p-3 rounded-xl bg-[#111111] border border-[#9A0957]/45 flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs text-[#CBD5E1]">
-              Collectible NIP-30 &amp; Reserve Emoji Rarity Cards ranked by total Arena takedowns, top-run appearances, and cryptographic SHA-256 power rating.{' '}
-              <span className="text-white font-semibold">
-                Mythic / Apex cards feature Prismatic Rainbow foil with Chrome Silver sparkles.
-              </span>
-            </div>
+          <div className="px-3.5 py-2.5 rounded-xl bg-[#111018] border border-white/10 text-xs text-[#94A3B8]">
+            Collectible Nostr emoji cards ranked by Arena takedowns, top-run features, and SHA-256 power rating.{' '}
+            <span className="text-white font-semibold">
+              Mythic cards shimmer with Prismatic Rainbow foil &amp; Chrome Silver sparkles.
+            </span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -794,16 +697,16 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
         </div>
       )}
 
-      {/* TAB 3: MY RECEIPTS */}
+      {/* TAB 3: MY RUNS */}
       {tab === 'local' &&
         (totalMyRuns === 0 ? (
-          <div className="py-10 px-4 text-center rounded-xl bg-[#111111] border border-white/10">
+          <div className="py-10 px-4 text-center rounded-xl bg-[#111018] border border-white/10">
             <p className="text-xs text-[#B8B8B8]">
               No run receipts recorded yet. Finish an Arena run to generate a receipt and shareable score card.
             </p>
           </div>
         ) : (
-          <div className="divide-y divide-white/10 rounded-xl bg-[#111111] border border-white/10">
+          <div className="divide-y divide-white/10 rounded-xl bg-[#111018] border border-white/10">
             {combinedMyRuns.localReceipts.map((rec) => {
               const isBusy = busyKey === rec.localId;
               const wasBroadcast =

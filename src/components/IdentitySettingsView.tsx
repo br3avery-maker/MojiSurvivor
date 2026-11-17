@@ -140,6 +140,9 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
   onImportCuratorBlocklist,
   onRefreshModerationReports,
 }) => {
+  const [profileTab, setProfileTab] = useState<'card' | 'account'>(
+    initialPanel !== 'profile' ? 'account' : 'card'
+  );
   const [openPanel, setOpenPanel] = useState<AccordionPanel | null>(initialPanel);
 
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -167,14 +170,17 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
 
   useEffect(() => {
     setOpenPanel(initialPanel);
+    if (initialPanel !== 'profile') {
+      setProfileTab('account');
+    }
   }, [initialPanel]);
 
   useEffect(() => {
-    if (openPanel === 'moderation') {
+    if (profileTab === 'account' && openPanel === 'moderation') {
       void onRefreshModerationReports();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openPanel]);
+  }, [profileTab, openPanel]);
 
   const startOrResumeNip46Session = useCallback(
     async (reuseExisting: boolean, copyImmediately: boolean) => {
@@ -504,28 +510,92 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
     : 'Guest · Not signed in';
 
   return (
-    <section className="max-w-3xl mx-auto px-4 py-3.5 space-y-2.5">
+    <section className="max-w-3xl mx-auto px-4 py-4 space-y-4">
       {storageError && (
-        <div className="px-3 py-2 rounded-lg bg-[#111111] border border-amber-500/40 text-xs text-amber-300 flex items-start gap-2">
+        <div className="px-3 py-2 rounded-lg bg-[#111018] border border-amber-500/40 text-xs text-amber-300 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{storageError}</span>
         </div>
       )}
 
       {statusMessage && (
-        <div className="px-3 py-2 rounded-lg bg-[#111111] border border-emerald-500/40 text-xs text-emerald-300">
+        <div className="px-3 py-2 rounded-lg bg-[#111018] border border-emerald-500/40 text-xs text-emerald-300">
           {statusMessage}
         </div>
       )}
 
       {errorMessage && (
-        <div className="px-3 py-2 rounded-lg bg-[#111111] border border-amber-500/40 text-xs text-amber-300">
+        <div className="px-3 py-2 rounded-lg bg-[#111018] border border-amber-500/40 text-xs text-amber-300">
           {errorMessage}
         </div>
       )}
 
-      {/* ACCORDION 1: PROFILE, SIGNERS & CROSS-DEVICE NOSTR SAVE (Default Open) */}
-      <div className="rounded-xl bg-[#111111] border border-white/10 overflow-hidden">
+      {/* Clean Profile Sub-View Switcher */}
+      <div className="flex items-center justify-between gap-3">
+        <div
+          role="tablist"
+          aria-label="Profile sections"
+          className="inline-flex items-center gap-1 p-1 rounded-xl bg-[#111018] border border-white/10"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={profileTab === 'card'}
+            onClick={() => setProfileTab('card')}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+              profileTab === 'card'
+                ? 'bg-[#FF1493] text-white'
+                : 'text-[#B8B8B8] hover:text-white'
+            }`}
+          >
+            Player Card
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={profileTab === 'account'}
+            onClick={() => {
+              setProfileTab('account');
+              if (!openPanel) setOpenPanel('profile');
+            }}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+              profileTab === 'account'
+                ? 'bg-[#FF1493] text-white'
+                : 'text-[#B8B8B8] hover:text-white'
+            }`}
+          >
+            Account &amp; Settings
+          </button>
+        </div>
+
+        <span className="text-xs font-mono text-[#94A3B8] truncate hidden sm:inline">
+          {profileSummaryText}
+        </span>
+      </div>
+
+      {profileTab === 'card' ? (
+        <div className="max-w-lg mx-auto py-1">
+          {persistedState ? (
+            <PlayerTradingCard
+              stats={buildPlayerStatsForAwards({
+                pubkey: coordinator.pubkey,
+                persisted: persistedState,
+                relayRuns: myRelayRuns ?? [],
+                localReceipts: persistedState.localReceipts,
+              })}
+              profile={profile}
+              defaultAvatarUrl={defaultAvatarUrl}
+            />
+          ) : (
+            <div className="p-8 rounded-xl bg-[#111018] border border-white/10 text-center text-xs text-[#94A3B8]">
+              Complete a run or sign in to generate your Survivor Card.
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-2.5">
+          {/* ACCORDION 1: ACCOUNT SIGNER & CLOUD SAVE */}
+          <div className="rounded-xl bg-[#111018] border border-white/10 overflow-hidden">
         <button
           type="button"
           aria-expanded={openPanel === 'profile'}
@@ -533,7 +603,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
           className="w-full min-h-[48px] px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-white/[0.02] transition-colors"
         >
           <span className="text-sm font-display font-bold text-white whitespace-nowrap">
-            Profile & Cloud Save
+            Account &amp; Cloud Save
           </span>
           <div className="flex items-center gap-2 min-w-0">
             <span className="text-xs font-mono text-[#B8B8B8] truncate">
@@ -548,92 +618,55 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
         </button>
 
         {openPanel === 'profile' && (
-          <div className="px-4 pb-4 pt-2 border-t border-white/10 space-y-4">
-            {persistedState && (
-              <PlayerTradingCard
-                stats={buildPlayerStatsForAwards({
-                  pubkey: coordinator.pubkey,
-                  persisted: persistedState,
-                  relayRuns: myRelayRuns ?? [],
-                  localReceipts: persistedState.localReceipts,
-                })}
-                profile={profile}
-                defaultAvatarUrl={defaultAvatarUrl}
-              />
-            )}
-
+          <div className="px-4 pb-4 pt-3 border-t border-white/10 space-y-4">
             {isSignedIn ? (
-              /* SIGNED-IN STATE: Sign-in forms hidden; displays active account + Log Out */
-              <div className="space-y-3 pt-1">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-12 h-12 rounded-xl emoji-opaque-pod p-0.5 overflow-hidden shrink-0">
-                      <img
-                        src={profile?.picture || defaultAvatarUrl}
-                        alt="Nostr profile avatar"
-                        referrerPolicy="no-referrer"
-                        onError={(e) => {
-                          (e.currentTarget as HTMLImageElement).src = defaultAvatarUrl;
-                        }}
-                        className="w-full h-full rounded-[10px] object-cover"
-                      />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-base font-display font-bold text-white truncate">
-                        {profile?.displayName ||
-                          profile?.name ||
-                          formatShortNpub(coordinator.pubkey)}
-                      </div>
-                      {profile?.nip05 && (
-                        <div className="text-xs font-mono text-[#FFB6D9] truncate">
-                          {profile.nip05}
-                        </div>
-                      )}
-                      <div className="text-xs text-[#B8B8B8] mt-0.5">
-                        Signed in via {signerLabel} · Cycle Lv.{playerLevel} ({playerXp}/{playerXpNext} XP)
-                      </div>
-                    </div>
+              /* SIGNED-IN STATE: Compact Account & Key Bar (No duplicate avatar/name) */
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs text-[#B8B8B8]">
+                    Signed in via <span className="text-white font-semibold">{signerLabel}</span>
+                    {' · '}Cycle Lv.{playerLevel} ({playerXp}/{playerXpNext} XP)
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleLogout}
-                    className="min-h-[40px] px-3.5 py-1.5 rounded-lg bg-[#1A1A1A] border border-white/15 hover:border-[#FF1493] text-xs font-semibold text-white transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                  >
-                    <LogOut className="w-3.5 h-3.5 text-[#FF1493]" />
-                    <span>Log Out</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={busyAction === 'profile'}
+                      onClick={() => void handleRefreshProfile()}
+                      className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#1A1A1A] border border-white/15 hover:border-white/35 text-xs text-white inline-flex items-center gap-1.5 whitespace-nowrap"
+                    >
+                      <RefreshCw
+                        className={`w-3 h-3 ${busyAction === 'profile' ? 'animate-spin' : ''}`}
+                      />
+                      <span>Refresh Profile</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      className="min-h-[34px] px-3 py-1 rounded-lg bg-[#1A1A1A] border border-white/15 hover:border-[#FF1493] text-xs font-semibold text-white transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+                    >
+                      <LogOut className="w-3.5 h-3.5 text-[#FF1493]" />
+                      <span>Log Out</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="p-2.5 rounded-lg bg-black border border-white/10 flex items-center justify-between gap-2">
                   <code className="text-[11px] font-mono text-[#B8B8B8] truncate">
                     {fullNpub}
                   </code>
-                  <div className="flex items-center gap-2.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => void copyText(fullNpub, 'npub')}
-                      className="text-xs text-white/80 hover:text-white inline-flex items-center gap-1 whitespace-nowrap"
-                    >
-                      {copiedField === 'npub' ? (
-                        <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      ) : (
-                        <Copy className="w-3.5 h-3.5" />
-                      )}
-                      <span>{copiedField === 'npub' ? 'Copied' : 'Copy'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busyAction === 'profile'}
-                      onClick={() => void handleRefreshProfile()}
-                      className="text-xs text-[#B8B8B8] hover:text-white inline-flex items-center gap-1 whitespace-nowrap"
-                    >
-                      <RefreshCw
-                        className={`w-3 h-3 ${busyAction === 'profile' ? 'animate-spin' : ''}`}
-                      />
-                      <span>Sync</span>
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void copyText(fullNpub, 'npub')}
+                    className="text-xs text-white/80 hover:text-white inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                  >
+                    {copiedField === 'npub' ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>{copiedField === 'npub' ? 'Copied' : 'Copy npub'}</span>
+                  </button>
                 </div>
 
                 {coordinator.signerMode === 'nsec' && coordinator.exportCurrentNsec() && (
@@ -1056,7 +1089,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
       </div>
 
       {/* ACCORDION 2: RELAYS (AUTO-PROBE DISCOVERY + MANUAL OVERRIDE) */}
-      <div className="rounded-xl bg-[#111111] border border-white/10 overflow-hidden">
+      <div className="rounded-xl bg-[#111018] border border-white/10 overflow-hidden">
         <button
           type="button"
           aria-expanded={openPanel === 'relays'}
@@ -1206,7 +1239,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
       </div>
 
       {/* ACCORDION 3: MODERATION (NSFW HASH & NPUB BAN LISTS, SAFE LIST & RELAY REPORTS) */}
-      <div className="rounded-xl bg-[#111111] border border-white/10 overflow-hidden">
+      <div className="rounded-xl bg-[#111018] border border-white/10 overflow-hidden">
         {(() => {
           const builtInBans = Array.from(getBuiltInBannedHexSet());
           const builtInHashBans = Array.from(getBuiltInBannedHashesSet());
@@ -1900,7 +1933,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
       </div>
 
       {/* ACCORDION 4: GAME SETTINGS */}
-      <div className="rounded-xl bg-[#111111] border border-white/10 overflow-hidden">
+      <div className="rounded-xl bg-[#111018] border border-white/10 overflow-hidden">
         <button
           type="button"
           aria-expanded={openPanel === 'game'}
@@ -1923,10 +1956,10 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
         </button>
 
         {openPanel === 'game' && (
-          <div className="px-4 pb-4 pt-3 border-t border-[#5B0633] space-y-3.5">
+          <div className="px-4 pb-4 pt-3 border-t border-white/10 space-y-3.5">
             <div className="space-y-1.5">
               <div className="text-xs font-semibold text-white">
-                16-Bit BreBre Pixel Arena Background
+                16-Bit Pixel Arena Background
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {ARENA_PIXEL_BG_OPTIONS.map((opt) => {
@@ -1943,8 +1976,8 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                       }
                       className={`text-left p-2.5 rounded-xl border transition-colors ${
                         active
-                          ? 'bg-[#5B0633]/45 border-[#FF1493] text-white'
-                          : 'bg-[#000000] border-[#5B0633] text-[#B8B8B8] hover:border-[#9A0957]'
+                          ? 'bg-[#FF1493]/12 border-[#FF1493] text-white'
+                          : 'bg-[#0B0A12] border-white/10 text-[#B8B8B8] hover:border-white/25'
                       }`}
                     >
                       <div className="text-xs font-semibold text-white flex items-center justify-between gap-2">
@@ -1953,7 +1986,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                           <span className="text-[10px] font-mono text-[#FFB6D9]">ACTIVE</span>
                         )}
                       </div>
-                      <div className="text-[11px] text-[#B8B8B8] mt-0.5">{opt.subtitle}</div>
+                      <div className="text-[11px] text-[#94A3B8] mt-0.5">{opt.subtitle}</div>
                     </button>
                   );
                 })}
@@ -1989,7 +2022,7 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                         [key]: !enabled,
                       })
                     }
-                    className="min-h-[40px] px-3 py-2 rounded-lg bg-[#000000] border border-[#5B0633] hover:border-[#9A0957] transition-colors flex items-center justify-between gap-2"
+                    className="min-h-[40px] px-3 py-2 rounded-lg bg-[#0B0A12] border border-white/10 hover:border-white/25 transition-colors flex items-center justify-between gap-2"
                   >
                     <span className="text-xs font-medium text-white truncate">{title}</span>
                     <span
@@ -2006,6 +2039,8 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
           </div>
         )}
       </div>
+        </div>
+      )}
     </section>
   );
 };

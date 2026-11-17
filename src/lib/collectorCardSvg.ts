@@ -10,6 +10,7 @@ import type { RenderedScoreCard } from './scoreCardRenderer';
 
 export interface CollectorCardData {
   player: string;
+  subtitleIdentity: string;
   pubkey: string;
   rarity: string;
   rarityTier: CardRarity;
@@ -36,13 +37,15 @@ export interface CollectorCardData {
   nemesisKills: number;
   badges: string[];
   nostrKind: number;
+  avatarDataUrl?: string;
+  mojiDataUrl?: string;
+  avatarPalette: string[];
 }
 
-const PINK = '#FF1493';
+const DEFAULT_PALETTE = ['#FF1493', '#36F3EB', '#A179FF', '#F8F6FF'];
 const WHITE = '#F7F5FF';
 const MUTED = '#A9ABC0';
 const SILVER = '#D3D9EA';
-const CYAN = '#36F3EB';
 const FONTS = "'Outfit', 'Inter', 'Arial', sans-serif";
 
 function xmlEscape(raw: string | number): string {
@@ -58,9 +61,6 @@ function num(v: number): string {
   return Math.max(0, Math.round(v)).toLocaleString('en-US');
 }
 
-/**
- * Deterministic PRNG seeded from player identity string (matches Python generator's deterministic seeding).
- */
 class DeterministicRng {
   private state: number;
 
@@ -94,9 +94,201 @@ class DeterministicRng {
   }
 }
 
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const d = max - min;
+  let h = 0;
+  const s = max === 0 ? 0 : d / max;
+  const v = max;
+
+  if (max !== min) {
+    switch (max) {
+      case rn:
+        h = (gn - bn) / d + (gn < bn ? 6 : 0);
+        break;
+      case gn:
+        h = (bn - rn) / d + 2;
+        break;
+      case bn:
+        h = (rn - gn) / d + 4;
+        break;
+    }
+    h /= 6;
+  }
+  return [h, s, v];
+}
+
+function hsvToHex(h: number, s: number, v: number): string {
+  // Enforce zero-gold constraint: shift warm yellow/gold hues (0.10..0.18) toward electric magenta/cyan/violet
+  let safeH = h;
+  if (safeH >= 0.09 && safeH <= 0.19) {
+    safeH = safeH < 0.14 ? 0.92 : 0.52;
+  }
+  const i = Math.floor(safeH * 6);
+  const f = safeH * 6 - i;
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  switch (i % 6) {
+    case 0:
+      r = v;
+      g = t;
+      b = p;
+      break;
+    case 1:
+      r = q;
+      g = v;
+      b = p;
+      break;
+    case 2:
+      r = p;
+      g = v;
+      b = t;
+      break;
+    case 3:
+      r = p;
+      g = q;
+      b = v;
+      break;
+    case 4:
+      r = t;
+      g = p;
+      b = v;
+      break;
+    case 5:
+      r = v;
+      g = p;
+      b = q;
+      break;
+  }
+  const toHex = (n: number) =>
+    Math.max(0, Math.min(255, Math.round(n * 255)))
+      .toString(16)
+      .padStart(2, '0')
+      .toUpperCase();
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+/**
+ * Loads an image URL (such as the player's Nostr avatar or top Moji sprite),
+ * converts it to a self-contained data URL for SVG embedding, and samples its
+ * dominant non-gold colors.
+ */
+export async function resolveImageAndPalette(
+  url: string | undefined,
+  fallbackUrl?: string
+): Promise<{ dataUrl?: string; palette: string[] }> {
+  const tryLoad = (targetUrl: string): Promise<HTMLImageElement | null> =>
+    new Promise((resolve) => {
+      const img = new Image();
+      let settled = false;
+      const done = (res: HTMLImageElement | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(res);
+      };
+      const timer = setTimeout(() => done(null), 2400);
+      if (!targetUrl.startsWith('data:') && !targetUrl.startsWith('blob:')) {
+        img.crossOrigin = 'anonymous';
+      }
+      img.referrerPolicy = 'no-referrer';
+      img.onload = () => {
+        clearTimeout(timer);
+        done(img.naturalWidth > 0 ? img : null);
+      };
+      img.onerror = () => {
+        clearTimeout(timer);
+        done(null);
+      };
+      img.src = targetUrl;
+    });
+
+  let img = url ? await tryLoad(url) : null;
+  if (!img && fallbackUrl && fallbackUrl !== url) {
+    img = await tryLoad(fallbackUrl);
+  }
+  if (!img) {
+    return { dataUrl: fallbackUrl || url, palette: [...DEFAULT_PALETTE] };
+  }
+
+  try {
+    const size = 160;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return { dataUrl: url || fallbackUrl, palette: [...DEFAULT_PALETTE] };
+    }
+    ctx.drawImage(img, 0, 0, size, size);
+    const dataUrl = canvas.toDataURL('image/png');
+
+    // Sample dominant high-contrast palette from image pixels
+    const px = ctx.getImageData(0, 0, size, size).data;
+    const buckets = new Map<string, Array<[number, number, number]>>();
+    for (let i = 0; i < px.length; i += 16) {
+      const r = px[i];
+      const g = px[i + 1];
+      const b = px[i + 2];
+      const a = px[i + 3];
+      if (a < 150) continue;
+      const [h, s, v] = rgbToHsv(r, g, b);
+      if (s < 0.2 || v < 0.22) continue;
+      const key = `${Math.round(h * 18) % 18}:${Math.round(s * 3)}`;
+      const list = buckets.get(key) ?? [];
+      list.push([r, g, b]);
+      buckets.set(key, list);
+    }
+
+    const ranked = Array.from(buckets.values()).sort((a, b) => b.length - a.length);
+    const selected: Array<[number, number, number]> = [];
+    for (const bucket of ranked) {
+      const avg: [number, number, number] = [
+        Math.floor(bucket.reduce((s, p) => s + p[0], 0) / bucket.length),
+        Math.floor(bucket.reduce((s, p) => s + p[1], 0) / bucket.length),
+        Math.floor(bucket.reduce((s, p) => s + p[2], 0) / bucket.length),
+      ];
+      if (
+        selected.every(
+          (o) => Math.hypot(avg[0] - o[0], avg[1] - o[1], avg[2] - o[2]) >= 65
+        )
+      ) {
+        selected.push(avg);
+      }
+      if (selected.length >= 4) break;
+    }
+
+    const palette = selected.map(([r, g, b]) => {
+      const [h, s, v] = rgbToHsv(r, g, b);
+      return hsvToHex(h, Math.max(0.62, s), Math.max(0.84, v));
+    });
+
+    for (const fallback of DEFAULT_PALETTE) {
+      if (palette.length >= 4) break;
+      if (!palette.includes(fallback)) palette.push(fallback);
+    }
+
+    return { dataUrl, palette };
+  } catch {
+    return { dataUrl: url || fallbackUrl, palette: [...DEFAULT_PALETTE] };
+  }
+}
+
 export function buildCollectorCardData(
   stats: PlayerStatsSnapshotForAwards,
-  profile?: NostrProfileMeta
+  profile?: NostrProfileMeta,
+  resolvedAssets?: {
+    avatarDataUrl?: string;
+    mojiDataUrl?: string;
+    avatarPalette?: string[];
+  }
 ): CollectorCardData {
   const awards = evaluatePlayerAwards(stats);
   const unlocked = awards.filter((a) => a.unlocked);
@@ -110,7 +302,6 @@ export function buildCollectorCardData(
     common: { rarity: 'COMMON', form: 'CHROME' },
   };
 
-  // Parse spell name and level from stats.signatureWeapon (e.g., "Chain Storm (Lv.4)")
   const rawSpell = stats.signatureWeapon || 'Chain Storm (Lv.1)';
   const lvlMatch = /\(Lv\.(\d+)\)/i.exec(rawSpell);
   const spellLevel = lvlMatch ? parseInt(lvlMatch[1], 10) || 1 : 1;
@@ -118,6 +309,7 @@ export function buildCollectorCardData(
 
   const displayName =
     profile?.displayName || profile?.name || formatShortNpub(stats.pubkey);
+  const subtitleIdentity = profile?.nip05 || formatShortNpub(stats.pubkey);
 
   const badgeTitles = (unlocked.length > 0 ? unlocked : awards.slice(0, 4))
     .slice(0, 4)
@@ -125,6 +317,7 @@ export function buildCollectorCardData(
 
   return {
     player: displayName,
+    subtitleIdentity,
     pubkey: stats.pubkey,
     rarity: rarityMap[rarityTier].rarity,
     rarityTier,
@@ -151,6 +344,12 @@ export function buildCollectorCardData(
     nemesisKills: stats.topMojiKills,
     badges: badgeTitles,
     nostrKind: 30078,
+    avatarDataUrl: resolvedAssets?.avatarDataUrl || profile?.picture,
+    mojiDataUrl: resolvedAssets?.mojiDataUrl || stats.topMojiUrl,
+    avatarPalette:
+      resolvedAssets?.avatarPalette && resolvedAssets.avatarPalette.length >= 3
+        ? resolvedAssets.avatarPalette
+        : [...DEFAULT_PALETTE],
   };
 }
 
@@ -243,81 +442,90 @@ function star(x: number, y: number, r: number, color = SILVER, op: string | numb
   return path(d, color, 'none', 1, `opacity="${op}"`);
 }
 
-function defs(rarityTier: CardRarity): string {
-  // Prismatic rainbow + silver foil for Mythic; distinct zero-gold gradients for other tiers
+function defs(data: CollectorCardData): string {
+  const [c0, c1, c2] = data.avatarPalette;
   const foilStops =
-    rarityTier === 'mythic'
-      ? `<stop offset="0%" stop-color="#FF1493"/><stop offset="19%" stop-color="#FF67E2"/>
-         <stop offset="37%" stop-color="#A179FF"/><stop offset="55%" stop-color="#36F3EB"/>
-         <stop offset="73%" stop-color="#F8F6FF"/><stop offset="87%" stop-color="#A8F5CA"/>
+    data.rarityTier === 'mythic'
+      ? `<stop offset="0%" stop-color="#FF1493"/><stop offset="19%" stop-color="${c0}"/>
+         <stop offset="37%" stop-color="#A179FF"/><stop offset="55%" stop-color="${c1}"/>
+         <stop offset="73%" stop-color="#F8F6FF"/><stop offset="87%" stop-color="${c2}"/>
          <stop offset="100%" stop-color="#FF1493"/>`
-      : rarityTier === 'epic'
-        ? `<stop offset="0%" stop-color="#FF1493"/><stop offset="50%" stop-color="#FFB6D9"/><stop offset="100%" stop-color="#A179FF"/>`
-        : rarityTier === 'rare'
-          ? `<stop offset="0%" stop-color="#36F3EB"/><stop offset="50%" stop-color="#F8F6FF"/><stop offset="100%" stop-color="#5B92EF"/>`
-          : rarityTier === 'uncommon'
-            ? `<stop offset="0%" stop-color="#10B981"/><stop offset="50%" stop-color="#A8F5CA"/><stop offset="100%" stop-color="#36F3EB"/>`
-            : `<stop offset="0%" stop-color="#94A3B8"/><stop offset="50%" stop-color="#F8F6FF"/><stop offset="100%" stop-color="#64748B"/>`;
+      : data.rarityTier === 'epic'
+        ? `<stop offset="0%" stop-color="${c0}"/><stop offset="50%" stop-color="#FFB6D9"/><stop offset="100%" stop-color="${c2}"/>`
+        : data.rarityTier === 'rare'
+          ? `<stop offset="0%" stop-color="${c1}"/><stop offset="50%" stop-color="#F8F6FF"/><stop offset="100%" stop-color="${c0}"/>`
+          : data.rarityTier === 'uncommon'
+            ? `<stop offset="0%" stop-color="#10B981"/><stop offset="50%" stop-color="${c1}"/><stop offset="100%" stop-color="#F8F6FF"/>`
+            : `<stop offset="0%" stop-color="#94A3B8"/><stop offset="50%" stop-color="#F8F6FF"/><stop offset="100%" stop-color="${c0}"/>`;
 
   return `<defs>
     <linearGradient id="foil" x1="0%" y1="12%" x2="100%" y2="82%">
       ${foilStops}
     </linearGradient>
-    <linearGradient id="prism" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#30102B"/><stop offset="36%" stop-color="#3C185C"/>
-      <stop offset="62%" stop-color="#133944"/><stop offset="100%" stop-color="#240B28"/>
-    </linearGradient>
-    <linearGradient id="orb" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#FFFFFF"/><stop offset="0.62" stop-color="#E7E9F2"/>
-      <stop offset="1" stop-color="#A4B2CB"/>
-    </linearGradient>
     <radialGradient id="glow">
-      <stop offset="0%" stop-color="#DD35F9" stop-opacity="0.30"/>
-      <stop offset="45%" stop-color="#8B1AA6" stop-opacity="0.16"/>
+      <stop offset="0%" stop-color="${c0}" stop-opacity="0.34"/>
+      <stop offset="45%" stop-color="${c1}" stop-opacity="0.16"/>
       <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
     </radialGradient>
     <pattern id="grid" width="42" height="42" patternUnits="userSpaceOnUse">
-      <path d="M 42 0 L 0 0 0 42" fill="none" stroke="#9F6AC5" stroke-opacity="0.09" stroke-width="0.8"/>
+      <path d="M 42 0 L 0 0 0 42" fill="none" stroke="${c0}" stroke-opacity="0.11" stroke-width="0.8"/>
     </pattern>
+    <clipPath id="heroAvatarClip">
+      <circle cx="360" cy="462" r="146"/>
+    </clipPath>
+    <clipPath id="mojiSatelliteClip">
+      <circle cx="486" cy="586" r="44"/>
+    </clipPath>
+    <clipPath id="miniAvatarClip">
+      <circle cx="114" cy="918" r="24"/>
+    </clipPath>
+    <clipPath id="backAvatarClip">
+      <circle cx="106" cy="98" r="28"/>
+    </clipPath>
+    <clipPath id="backMojiClip">
+      <circle cx="614" cy="802" r="30"/>
+    </clipPath>
   </defs>`;
 }
 
-function svgOpen(rarityTier: CardRarity): string {
+function svgOpen(data: CollectorCardData): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1080" viewBox="0 0 720 1080">${defs(
-    rarityTier
+    data
   )}`;
 }
 
-function base(seedHex: string, xorMask = 0): string[] {
+function base(data: CollectorCardData, seedHex: string, xorMask = 0): string[] {
+  const [c0, c1] = data.avatarPalette;
   const out: string[] = [
     rect(0, 0, 720, 1080, 0, '#000000'),
-    rect(11, 11, 698, 1058, 36, '#09080F', 'url(#foil)', 3),
-    rect(22, 22, 676, 1036, 28, 'none', '#FAE9FB', 0.7, 0.52),
+    rect(11, 11, 698, 1058, 36, '#09080F', 'url(#foil)', 3.2),
+    rect(22, 22, 676, 1036, 28, 'none', '#FAE9FB', 0.8, 0.55),
     rect(36, 36, 648, 1008, 24, 'url(#grid)'),
-    rect(36, 36, 648, 1008, 24, 'none', '#4C274B', 1),
+    rect(36, 36, 648, 1008, 24, 'none', c0, 1, 0.45),
     rect(37, 37, 646, 1006, 24, 'url(#glow)'),
   ];
 
   const rng = new DeterministicRng(seedHex, xorMask);
-  for (let i = 0; i < 74; i++) {
+  // Star density scales with player achievements & rebirths
+  const rimCount = 56 + Math.min(40, data.awardsUnlocked * 4 + data.rebirthTier * 3);
+  for (let i = 0; i < rimCount; i++) {
     const x = rng.randInt(45, 674);
     const y = rng.randInt(47, 1030);
-    // Restrict stars mostly to rim; keep all content clear
     if (x > 115 && x < 605 && y > 110 && y < 976) {
       continue;
     }
-    if (i % 6 === 0) {
-      out.push(star(x, y, rng.choice([3.4, 4, 5.8]), SILVER, 0.65));
+    if (i % 5 === 0) {
+      out.push(star(x, y, rng.choice([3.4, 4.2, 5.8]), SILVER, 0.72));
     } else {
       out.push(
         circle(
           x,
           y,
-          rng.choice([0.7, 1, 1.5]),
-          i % 4 === 0 ? CYAN : PINK,
+          rng.choice([0.8, 1.1, 1.6]),
+          i % 3 === 0 ? c1 : c0,
           'none',
           1,
-          'opacity="0.55"'
+          'opacity="0.58"'
         )
       );
     }
@@ -331,179 +539,65 @@ function footer(out: string[], data: CollectorCardData, side: string): void {
     txt(
       70,
       1028,
-      `MOJISURVIVOR  /  NOSTR ${data.nostrKind}`,
-      12,
+      `MOJISURVIVOR  /  NOSTR ${data.nostrKind}  •  ${formatShortNpub(data.pubkey)}`,
+      11.5,
       MUTED,
       650,
       'start',
-      1.5
+      1.2
     ),
-    txt(650, 1028, `${side}  •  ${data.player}`, 12, SILVER, 500, 'end')
+    txt(650, 1028, `${side}  •  ${data.player.slice(0, 18)}`, 12, SILVER, 600, 'end')
   );
 }
 
-function hero(out: string[], seedHex: string): void {
-  const rng = new DeterministicRng(seedHex, 0);
+/**
+ * Renders one clean focal circular portrait inside a crisp prismatic/silver ring
+ * with soft ambient glow — no stacked shards, bolts, or overlapping satellite circles.
+ */
+function heroPortrait(out: string[], data: CollectorCardData): void {
   const cx = 360;
   const cy = 462;
+  const [c0, c1] = data.avatarPalette;
 
   out.push(
-    circle(cx, cy, 252, 'url(#glow)'),
-    circle(
-      cx,
-      cy,
-      211,
-      'none',
-      '#FF1493',
-      1.0,
-      'stroke-dasharray="2 16" opacity="0.48"'
-    ),
-    circle(cx, cy, 196, 'none', '#BCEFFC', 0.9, 'opacity="0.33"')
+    circle(cx, cy, 240, 'url(#glow)'),
+    circle(cx, cy, 174, 'none', c1, 1, 'opacity="0.24"'),
+    circle(cx, cy, 162, '#07070B', 'url(#foil)', 6.5),
+    circle(cx, cy, 152, '#0D0B14', '#F6F7FF', 1.6, 'opacity="0.75"')
   );
 
-  // Angular foil shards: deterministic per npub/pubkey
-  const palette = ['#FF1493', '#CC3BFC', '#8A76FF', '#39E5E0', '#CCE2FF', '#5B92EF'];
-  for (let i = 0; i < 16; i++) {
-    const a = (i * 2 * Math.PI) / 16 + (-9 * Math.PI) / 180;
-    const b = a + (rng.uniform(11, 20) * Math.PI) / 180;
-    const inner = rng.uniform(167, 192);
-    const outer = rng.uniform(205, 258);
-    const points: Array<[number, number]> = [
-      [cx + inner * Math.cos(a), cy + inner * Math.sin(a)],
-      [cx + outer * Math.cos(a + 0.05), cy + outer * Math.sin(a + 0.05)],
-      [cx + outer * 0.9 * Math.cos(b), cy + outer * 0.9 * Math.sin(b)],
-      [cx + (inner - 15) * Math.cos(b - 0.05), cy + (inner - 15) * Math.sin(b - 0.05)],
-    ];
+  if (data.avatarDataUrl) {
     out.push(
-      poly(
-        points,
-        palette[i % palette.length],
-        'none',
-        1,
-        (0.13 + 0.14 * (i % 3)).toFixed(2)
-      )
+      `<g clip-path="url(#heroAvatarClip)">`,
+      rect(cx - 150, cy - 150, 300, 300, 0, '#120E1C'),
+      `<image href="${xmlEscape(
+        data.avatarDataUrl
+      )}" x="${cx - 146}" y="${cy - 146}" width="292" height="292" preserveAspectRatio="xMidYMid slice"/>`,
+      `</g>`
     );
-  }
-
-  // Hero emblem's rings and silhouette
-  out.push(
-    circle(cx, cy, 172, '#05050B', '#605179', 14),
-    circle(cx, cy, 174, 'none', 'url(#foil)', 8),
-    circle(cx, cy, 161, 'none', '#F6F7FF', 2.5, 'opacity="0.89"'),
-    circle(cx, cy, 152, 'url(#orb)'),
-    circle(cx - 47, cy - 42, 13, '#06060B'),
-    circle(cx + 47, cy - 42, 13, '#06060B'),
-    // X pupils
-    path(
-      `M ${cx - 64} ${cy - 60} l 34 36 m 0 -36 l -34 36`,
-      'none',
-      '#0A0A10',
-      9,
-      'stroke-linecap="round"'
-    ),
-    path(
-      `M ${cx + 30} ${cy - 60} l 34 36 m 0 -36 l -34 36`,
-      'none',
-      '#0A0A10',
-      9,
-      'stroke-linecap="round"'
-    ),
-    path(
-      `M ${cx - 81} ${cy + 45} Q ${cx} ${cy + 119} ${cx + 84} ${cy + 34}`,
-      'none',
-      '#0B0B11',
-      13,
-      'stroke-linecap="round"'
-    ),
-    path(
-      `M ${cx + 26} ${cy + 77} q 5 44 29 37 q 18 -6 9 -47`,
-      PINK,
-      '#0D0C13',
-      6
-    ),
-    path(`M ${cx + 47} ${cy + 100} q 12 2 16 -12`, 'none', '#FFBBE2', 3)
-  );
-
-  // Electrified chain: polygon lightning with anchor rivets
-  const bolts: Array<[number, number, number, number]> = [
-    [121, 394, 1, -8],
-    [557, 502, 0.92, 8],
-    [258, 646, 0.72, -18],
-  ];
-  const baseBoltPts: Array<[number, number]> = [
-    [-7, -73],
-    [30, -73],
-    [7, -16],
-    [34, -16],
-    [-29, 76],
-    [-11, 10],
-    [-39, 10],
-  ];
-
-  for (const [bx, by, sc, rot] of bolts) {
-    const a = (rot * Math.PI) / 180;
-    const transformed: Array<[number, number]> = baseBoltPts.map(([u, v]) => [
-      bx + sc * (u * Math.cos(a) - v * Math.sin(a)),
-      by + sc * (u * Math.sin(a) + v * Math.cos(a)),
-    ]);
-    out.push(poly(transformed, '#F7F8FF', '#25D8F3', 2.4));
-    out.push(circle(bx, by, 9, '#06050A', PINK, 3));
-  }
-
-  // Chain link segments
-  const chains: Array<[[number, number], [number, number]]> = [
-    [
-      [155, 554],
-      [228, 608],
-    ],
-    [
-      [493, 355],
-      [567, 329],
-    ],
-  ];
-  for (const [[x1, y1], [x2, y2]] of chains) {
-    out.push(line(x1, y1, x2, y2, '#DDD7F0', 7, 0.66));
-    for (let j = 0; j < 4; j++) {
-      const t = (j + 0.5) / 4;
-      const px = x1 + t * (x2 - x1);
-      const py = y1 + t * (y2 - y1);
-      out.push(circle(px, py, 9, '#090910', SILVER, 4));
-    }
-  }
-
-  const stars: Array<[number, number, number]> = [
-    [143, 290, 7],
-    [576, 420, 6],
-    [183, 607, 11],
-    [581, 615, 8],
-    [316, 228, 6],
-  ];
-  for (const [sx, sy, sr] of stars) {
-    out.push(star(sx, sy, sr, SILVER));
+  } else {
+    out.push(
+      circle(cx, cy, 144, '#130F1E', c0, 2.5),
+      txt(cx, cy + 28, data.player.slice(0, 2).toUpperCase(), 88, WHITE, 900, 'middle')
+    );
   }
 }
 
 export function generateCollectorCardFrontSvg(data: CollectorCardData): string {
-  const seedHex = sha256Hex(data.pubkey || data.player);
-  const out: string[] = [svgOpen(data.rarityTier), ...base(seedHex, 0)];
+  const seedHex = sha256Hex(`${data.pubkey}:${data.bestRun}:${data.highestWave}`);
+  const out: string[] = [svgOpen(data), ...base(data, seedHex, 0)];
+  const [c0, c1] = data.avatarPalette;
 
-  const spellHeadline = data.spell.toUpperCase().slice(0, 18);
+  const playerHeadline = data.player.toUpperCase().slice(0, 18);
+  const spellSubline = `${data.spell.toUpperCase()} (LV.${data.spellLevel})   •   ${data.form} FORM`;
+
   out.push(
     txt(67, 90, 'MOJI  /  SURVIVOR', 20, WHITE, 850, 'start', 2.4),
     rect(520, 59, 130, 42, 21, '#15121D', 'url(#foil)', 2),
-    txt(585, 88, data.rarity, 18, WHITE, 850, 'middle', 1.8),
+    txt(585, 86, data.rarity, 17, WHITE, 850, 'middle', 1.8),
     line(68, 117, 651, 117, '#666073', 1),
-    txt(68, 160, spellHeadline, 44, WHITE, 900, 'start', -0.8),
-    txt(
-      69,
-      184,
-      `SIGNATURE MOJI    •    ${data.form} FORM`,
-      13,
-      PINK,
-      750,
-      'start',
-      2
-    ),
+    txt(68, 160, playerHeadline, 42, WHITE, 900, 'start', -0.6),
+    txt(69, 185, spellSubline, 13, c0, 750, 'start', 1.8),
     txt(
       69,
       211,
@@ -518,34 +612,50 @@ export function generateCollectorCardFrontSvg(data: CollectorCardData): string {
     )
   );
 
-  hero(out, seedHex);
+  heroPortrait(out, data);
 
   out.push(
     txt(70, 740, 'CYCLE LEVEL', 13, MUTED, 730, 'start', 2.2),
     txt(68, 800, String(data.cycleLevel).padStart(2, '0'), 64, WHITE, 900),
-    txt(164, 794, 'LV', 18, PINK, 800, 'start', 1),
+    txt(164, 794, 'LV', 18, c0, 800, 'start', 1),
     line(270, 728, 270, 803, '#63536C', 1),
-    txt(303, 740, 'BEST RUN', 13, MUTED, 730, 'start', 2.2),
+    txt(303, 740, 'BEST SINGLE RUN', 13, MUTED, 730, 'start', 2.2),
     txt(302, 795, num(data.bestRun), 46, WHITE, 900, 'start', -1.8),
-    txt(645, 795, 'PTS', 14, PINK, 800, 'end'),
+    txt(645, 795, 'PTS', 14, c0, 800, 'end'),
     line(70, 822, 650, 822, '#5D4E67', 1),
-    txt(70, 852, `WAVE ${data.highestWave}`, 23, CYAN, 800),
+    txt(70, 852, `WAVE ${data.highestWave}`, 23, c1, 800),
+    txt(360, 852, `${num(data.defeated)} SLAIN`, 20, WHITE, 750, 'middle'),
     txt(650, 852, `${data.bosses} BOSSES`, 23, SILVER, 800, 'end'),
-    rect(68, 877, 584, 82, 14, '#111019', '#363041', 1.1),
-    txt(88, 908, data.player.slice(0, 26), 18, WHITE, 750),
-    txt(88, 937, 'ACHIEVEMENTS', 12, MUTED, 750, 'start', 1.7)
+    rect(68, 877, 584, 82, 14, '#111019', '#363041', 1.1)
+  );
+
+  if (data.avatarDataUrl) {
+    out.push(
+      circle(114, 918, 26, '#09080F', 'url(#foil)', 2),
+      `<g clip-path="url(#miniAvatarClip)">`,
+      `<image href="${xmlEscape(
+        data.avatarDataUrl
+      )}" x="90" y="894" width="48" height="48" preserveAspectRatio="xMidYMid slice"/>`,
+      `</g>`
+    );
+  }
+
+  const textStartX = data.avatarDataUrl ? 152 : 88;
+  out.push(
+    txt(textStartX, 910, data.subtitleIdentity.slice(0, 28), 16, WHITE, 750),
+    txt(textStartX, 937, `ACHIEVEMENTS (${data.awardsUnlocked}/${data.awardsTotal})`, 11.5, MUTED, 750, 'start', 1.4)
   );
 
   for (let i = 0; i < data.awardsTotal; i++) {
-    const x = 400 + i * 24.6;
+    const x = 408 + i * 23.5;
     if (i < data.awardsUnlocked) {
       out.push(
         poly(
           [
-            [x, 927],
-            [x + 8, 934],
-            [x, 941],
-            [x - 8, 934],
+            [x, 924],
+            [x + 8, 932],
+            [x, 940],
+            [x - 8, 932],
           ],
           'url(#foil)',
           '#FAF7FF',
@@ -556,10 +666,10 @@ export function generateCollectorCardFrontSvg(data: CollectorCardData): string {
       out.push(
         poly(
           [
-            [x, 927],
-            [x + 8, 934],
-            [x, 941],
-            [x - 8, 934],
+            [x, 924],
+            [x + 8, 932],
+            [x, 940],
+            [x - 8, 932],
           ],
           '#191822',
           '#686476',
@@ -588,40 +698,62 @@ function smallStat(
 }
 
 export function generateCollectorCardBackSvg(data: CollectorCardData): string {
-  const seedHex = sha256Hex(data.pubkey || data.player);
-  const out: string[] = [svgOpen(data.rarityTier), ...base(seedHex, 0x1234)];
+  const seedHex = sha256Hex(`${data.pubkey}:reverse:${data.careerScore}`);
+  const out: string[] = [svgOpen(data), ...base(data, seedHex, 0x1234)];
+  const [c0, c1] = data.avatarPalette;
 
+  if (data.avatarDataUrl) {
+    out.push(
+      circle(106, 98, 30, '#09080F', 'url(#foil)', 2.4),
+      `<g clip-path="url(#backAvatarClip)">`,
+      `<image href="${xmlEscape(
+        data.avatarDataUrl
+      )}" x="78" y="70" width="56" height="56" preserveAspectRatio="xMidYMid slice"/>`,
+      `</g>`
+    );
+  }
+
+  const headerX = data.avatarDataUrl ? 150 : 68;
   out.push(
-    txt(68, 94, 'THE CAREER ARCHIVE', 34, WHITE, 900, 'start', -0.8),
+    txt(headerX, 94, 'THE CAREER ARCHIVE', 31, WHITE, 900, 'start', -0.8),
     rect(530, 61, 120, 36, 18, '#120D1C', 'url(#foil)', 2),
     txt(590, 85, data.rarity, 16, WHITE, 850, 'middle', 2),
     txt(
-      70,
-      127,
-      `PERMANENT RECORD  /  ${data.player.slice(0, 28)}`,
-      13,
+      headerX,
+      122,
+      `${data.player.slice(0, 22)}  •  ${data.subtitleIdentity.slice(0, 24)}`,
+      12.5,
       MUTED,
       650,
       'start',
-      1.0
+      0.8
     ),
     line(70, 149, 650, 149, '#686077', 1),
-    txt(70, 191, 'ALL-TIME CAREER SCORE', 14, CYAN, 760, 'start', 2.1),
-    txt(65, 270, num(data.careerScore), 65, WHITE, 900, 'start', -2),
-    txt(73, 294, 'TOTAL POINTS', 12, MUTED, 730, 'start', 1.5),
+    txt(70, 191, 'ALL-TIME CAREER SCORE', 14, c1, 760, 'start', 2.1),
+    txt(65, 270, num(data.careerScore), 64, WHITE, 900, 'start', -2),
+    txt(
+      73,
+      294,
+      `TOTAL POINTS ACROSS ${num(data.runs)} VERIFIED RUNS  •  REBIRTH TIER ${data.rebirthTier}`,
+      12,
+      MUTED,
+      730,
+      'start',
+      1.3
+    ),
     line(70, 318, 650, 318, '#535066', 1)
   );
 
-  // Two-column comparison lines (NOT 6 dashboard cards)
+  // Two-column comparison lines driven by player stats
   const specs: Array<[string, string, string]> = [
-    ['EMOJIS DEFEATED', num(data.defeated), CYAN],
-    ['HIGHEST WAVE', String(data.highestWave).padStart(2, '0'), WHITE],
-    ['BOSSES SLAIN', num(data.bosses), PINK],
-    ['RUNS', String(data.runs), WHITE],
-    ['MOJO BALANCE', num(data.mojoBalance), PINK],
+    ['EMOJIS DEFEATED', num(data.defeated), c1],
+    ['HIGHEST WAVE', `WAVE ${String(data.highestWave).padStart(2, '0')}`, WHITE],
+    ['APEX BOSSES SLAIN', num(data.bosses), c0],
+    ['VERIFIED RUNS', num(data.runs), WHITE],
+    ['MOJO BALANCE', num(data.mojoBalance), c0],
     ['LIFETIME MOJO', num(data.mojoLifetime), WHITE],
-    ['CODEX ENTRIES', num(data.codexUnlocks), CYAN],
-    ['UPGRADE LEVELS', `${data.upgradeLevels}/${data.upgradeTotal}`, WHITE],
+    ['CODEX ENTRIES', `${num(data.codexUnlocks)} MOJIS`, c1],
+    ['UPGRADE LAB', `${data.upgradeLevels}/${data.upgradeTotal} LV`, WHITE],
   ];
 
   for (let row = 0; row < 4; row++) {
@@ -638,37 +770,60 @@ export function generateCollectorCardBackSvg(data: CollectorCardData): string {
 
   out.push(
     line(70, 733, 650, 733, '#60516C', 1),
-    txt(75, 769, 'SIGNATURE', 13, MUTED, 800, 'start', 1.8),
-    txt(75, 807, data.spell.toUpperCase().slice(0, 22), 26, WHITE, 880, 'start', 0.4),
-    txt(650, 807, `LV ${data.spellLevel}`, 21, PINK, 800, 'end'),
+    txt(75, 769, 'SIGNATURE SPELL & NEMESIS MOJI', 13, MUTED, 800, 'start', 1.8),
     txt(
       75,
-      833,
-      `NEMESIS: ${data.nemesis}   /   ${num(data.nemesisKills)} DEFEATED`,
-      14,
+      807,
+      `${data.spell.toUpperCase().slice(0, 20)} (LV.${data.spellLevel})`,
+      25,
+      WHITE,
+      880,
+      'start',
+      0.4
+    ),
+    txt(
+      75,
+      835,
+      `MOST SLAIN MOJI: ${data.nemesis}   •   ${num(data.nemesisKills)} DEFEATED`,
+      13.5,
       SILVER,
       650
-    ),
+    )
+  );
+
+  if (data.mojiDataUrl) {
+    out.push(
+      circle(614, 802, 34, '#120E1C', 'url(#foil)', 2.4),
+      `<g clip-path="url(#backMojiClip)">`,
+      `<image href="${xmlEscape(
+        data.mojiDataUrl
+      )}" x="588" y="776" width="52" height="52" preserveAspectRatio="xMidYMid meet"/>`,
+      `</g>`
+    );
+  } else {
+    out.push(txt(650, 807, `LV ${data.spellLevel}`, 21, c0, 800, 'end'));
+  }
+
+  out.push(
     line(70, 858, 650, 858, '#60516C', 1),
     txt(75, 890, 'VERIFIED ACHIEVEMENTS', 15, WHITE, 850, 'start', 1.4),
     txt(
       650,
       890,
-      `${data.awardsUnlocked} / ${data.awardsTotal}`,
+      `${data.awardsUnlocked} / ${data.awardsTotal} UNLOCKED`,
       15,
-      CYAN,
+      c1,
       850,
       'end'
     )
   );
 
-  // Four featured award names in two clean rows
   const names = data.badges.slice(0, 4);
   for (let i = 0; i < names.length; i++) {
     const row = Math.floor(i / 2);
     const col = i % 2;
     const x = 77 + col * 300;
-    const y = 916 + row * 34;
+    const y = 918 + row * 34;
     out.push(circle(x + 8, y - 6, 6, 'url(#foil)'));
     out.push(txt(x + 22, y, names[i], 15, WHITE, 650));
   }
@@ -698,17 +853,25 @@ async function loadSvgImage(svgString: string): Promise<HTMLImageElement> {
   });
 }
 
-/**
- * Renders the Two-Sided Collector Card (Front, Reverse, or Side-by-Side Dual Spread)
- * to a high-DPI PNG blob for sharing or downloading.
- */
 export async function renderCollectorCardPng(opts: {
   stats: PlayerStatsSnapshotForAwards;
   profile?: NostrProfileMeta;
+  defaultAvatarUrl?: string;
   side?: 'front' | 'back' | 'both';
 }): Promise<RenderedScoreCard> {
-  const { stats, profile, side = 'both' } = opts;
-  const data = buildCollectorCardData(stats, profile);
+  const { stats, profile, defaultAvatarUrl, side = 'both' } = opts;
+
+  const [avatarResolved, mojiResolved] = await Promise.all([
+    resolveImageAndPalette(profile?.picture, defaultAvatarUrl),
+    resolveImageAndPalette(stats.topMojiUrl),
+  ]);
+
+  const data = buildCollectorCardData(stats, profile, {
+    avatarDataUrl: avatarResolved.dataUrl,
+    mojiDataUrl: mojiResolved.dataUrl,
+    avatarPalette: avatarResolved.palette,
+  });
+
   const frontSvg = generateCollectorCardFrontSvg(data);
   const backSvg = generateCollectorCardBackSvg(data);
 

@@ -7,16 +7,16 @@
     --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
-    /* BreBre Colors UI Standards Palette v0 */
-    --brebre-black: #000000;
+    /* Refined Dark Obsidian + Slate Palette (Zero Gold) */
+    --brebre-black: #07070b;
     --brebre-deep-pink: #ff1493;
     --brebre-light-pink: #ffb6d9;
     --brebre-white: #ffffff;
     --brebre-gray-100: #b8b8b8;
-    --brebre-gray-900: #111111;
-    --brebre-gray-850: #1a1a1a;
-    --brebre-silver: #c0c0c0;
-    --brebre-gray-600: #5e5e5e;
+    --brebre-gray-900: #111018;
+    --brebre-gray-850: #181722;
+    --brebre-silver: #d3d9ea;
+    --brebre-gray-600: #6b6e82;
     --brebre-pink-dark-1: #cd0d72;
     --brebre-pink-dark-2: #9a0957;
     --brebre-pink-dark-3: #5b0633;
@@ -26,7 +26,7 @@
   body,
   #root {
     height: 100%;
-    background-color: #000000;
+    background-color: #07070b;
     color: #ffffff;
     font-family: var(--font-sans);
     letter-spacing: 0.01em;
@@ -60,18 +60,18 @@
  * Subtle dark framing pod for transparent NIP-30 custom emoji assets (including animated GIFs).
  */
 .emoji-opaque-pod {
-  background-color: rgba(26, 26, 26, 0.72);
-  border: 1px solid rgba(154, 9, 87, 0.55);
+  background-color: #161520;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .emoji-opaque-pod-dark {
-  background-color: #141414;
-  border: 1px solid #5b0633;
+  background-color: #111018;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .brebre-card {
-  background-color: #111111;
-  border: 1px solid rgba(154, 9, 87, 0.45);
+  background-color: #111018;
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .crt-scanlines {

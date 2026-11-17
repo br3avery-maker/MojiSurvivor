@@ -748,7 +748,7 @@ export const CodexView: React.FC<CodexViewProps> = ({
                     </div>
                     <div className="flex justify-between gap-2">
                       <span>Bounty</span>
-                      <span className="text-[#FFD700]">
+                      <span className="text-[#E2E8F0]">
                         +{selectedEmoji.expValue * 4} Spell XP · +{selectedEmoji.mojoValue} Mojo
                       </span>
                     </div>

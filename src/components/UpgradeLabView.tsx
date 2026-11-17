@@ -61,7 +61,7 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
       setFeedback({
         type: 'success',
         key: spec.key,
-        message: `Upgraded ${spec.label} to Lv.${res.newLevel}/${spec.maxLevel} (${res.remainingMojo.toLocaleString()} Mojo remaining).`,
+        message: `Upgraded ${spec.label} to Lv.${res.newLevel}/${spec.maxLevel} (${res.remainingMojo.toLocaleString()} Mojo left).`,
       });
     } else {
       setFeedback({
@@ -83,72 +83,68 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
     if (res.ok) {
       setFeedback({
         type: 'success',
-        message: `Career Rebirth Tier ${res.newRebirthCount} unlocked! Cycle Level reset to Lv.1 (Lifetime XP preserved). Permanent +${res.newRebirthCount * 15}% DMG, +${res.newRebirthCount * 12}% Mojo Bounty, +${res.newRebirthCount * 10}% Max Hull, and +${res.newRebirthCount * 6}% Haste active.`,
+        message: `Rebirth Tier ${res.newRebirthCount} unlocked! Cycle Level reset to Lv.1.`,
       });
     } else {
       setFeedback({
         type: 'error',
-        message: res.error ?? 'Requirements not met for Career Rebirth.',
+        message: res.error ?? 'Requirements not met for Rebirth.',
       });
     }
   };
 
   return (
-    <section className="max-w-5xl mx-auto px-4 py-4 space-y-3.5">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#9A0957]/45">
+    <section className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-5">
+      {/* Clean Page Header */}
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 pb-4 border-b border-white/10">
         <div>
-          <div className="w-7 h-1 rounded-full bg-[#FF1493] mb-1" />
-          <h1 className="text-lg font-display font-bold text-white">Upgrade Lab</h1>
-          <p className="text-xs text-[#B8B8B8]">
-            Permanent hull &amp; spell upgrades saved locally and synced via Nostr snapshots.
+          <h1 className="text-xl sm:text-2xl font-display font-bold text-white tracking-tight">
+            Upgrade Lab
+          </h1>
+          <p className="text-sm text-[#B8B8B8] mt-0.5">
+            Spend Mojo on permanent ship and spell upgrades.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-4 font-mono tabular-nums text-sm">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs sm:text-sm font-mono tabular-nums text-[#B8B8B8]">
           {rebirthCount > 0 && (
-            <div>
-              <span className="text-xs text-[#B8B8B8]">Rebirth: </span>
-              <span className="font-bold text-[#00F0FF]">Tier {rebirthCount}</span>
-            </div>
-          )}
-          <div>
-            <span className="text-xs text-[#B8B8B8]">Cycle Lv: </span>
-            <span className="font-bold text-[#FFB6D9]">Lv.{playerLevel}</span>
-            <span className="text-xs text-[#5E5E5E]">
-              {' '}({playerXp}/{playerXpNext})
+            <span>
+              Rebirth <strong className="text-[#36F3EB]">Tier {rebirthCount}</strong>
             </span>
-          </div>
+          )}
+          <span>
+            Cycle <strong className="text-white">Lv.{playerLevel}</strong>{' '}
+            <span className="text-[#6B6E82]">
+              ({playerXp}/{playerXpNext})
+            </span>
+          </span>
           {lifetimeXpEarned > 0 && (
-            <div>
-              <span className="text-xs text-[#B8B8B8]">Lifetime XP: </span>
-              <span className="font-bold text-[#E2E8F0]">
+            <span>
+              Lifetime XP{' '}
+              <strong className="text-[#D3D9EA]">
                 {lifetimeXpEarned.toLocaleString()}
-              </span>
-            </div>
-          )}
-          <div>
-            <span className="text-xs text-[#B8B8B8]">Mojo Available: </span>
-            <span className="font-bold text-[#FF1493]">
-              {mojoBalance.toLocaleString()} Mojo
+              </strong>
             </span>
-          </div>
+          )}
+          <span>
+            Mojo{' '}
+            <strong className="text-[#FF1493]">
+              {mojoBalance.toLocaleString()}
+            </strong>
+          </span>
         </div>
       </div>
 
       {feedback && (
         <div
           role="status"
-          className={`px-3.5 py-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
-            feedback.type === 'success'
-              ? 'bg-[#111111] border-[#FF1493]/60 text-[#FFB6D9]'
-              : 'bg-[#111111] border-[#9A0957] text-[#B8B8B8]'
-          }`}
+          className="px-4 py-3 rounded-xl bg-[#111018] border border-white/15 text-xs flex items-center justify-between gap-3"
         >
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 text-[#D3D9EA]">
             {feedback.type === 'success' ? (
-              <Check className="w-4 h-4 shrink-0 text-[#FF1493]" />
+              <Check className="w-4 h-4 shrink-0 text-[#36F3EB]" />
             ) : (
-              <AlertCircle className="w-4 h-4 shrink-0 text-[#FFB6D9]" />
+              <AlertCircle className="w-4 h-4 shrink-0 text-[#FF1493]" />
             )}
             <span>{feedback.message}</span>
           </div>
@@ -162,47 +158,34 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
         </div>
       )}
 
-      {/* Career Rebirth Prestige Panel */}
-      <div className="p-4 rounded-xl bg-[#111111] border border-[#00F0FF]/40 flex flex-col md:flex-row md:items-center justify-between gap-3.5">
+      {/* Concise Career Rebirth Prestige Panel */}
+      <div className="p-4 sm:p-5 rounded-xl bg-[#111018] border border-white/10 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1.5 min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 text-sm font-display font-bold text-white">
-              <Flame className="w-4 h-4 text-[#00F0FF]" />
-              <span>Career Rebirth Prestige</span>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <Flame className="w-4 h-4 text-[#36F3EB] shrink-0" />
+            <span className="font-display font-bold text-white">
+              Career Rebirth Prestige
             </span>
-            <span className="text-xs font-mono font-semibold text-[#00F0FF] tabular-nums">
+            <span className="text-xs font-mono text-[#36F3EB] tabular-nums">
               · Tier {rebirthCount} Active
             </span>
           </div>
-          <p className="text-xs text-[#B8B8B8] leading-relaxed">
-            Reset your 5 Upgrade Lab tracks to Lv.0 and Cycle Level to{' '}
-            <span className="text-white font-semibold">Lv.1</span> at{' '}
-            <span className="text-white font-semibold">Cycle Player Lv.20+</span> (or{' '}
-            <span className="text-white font-semibold">15+ total upgrade levels</span>, currently{' '}
-            <span className="font-mono text-[#FFB6D9]">
+          <p className="text-xs text-[#B8B8B8]">
+            Resets Upgrades &amp; Cycle Level to Lv.1 · Preserves Mojo, Lifetime XP &amp; Codex (requires Lv.20 or 15+ upgrades, currently{' '}
+            <span className="font-mono text-white">
               {totalUpgradeLevels}/{MAX_TOTAL_UPGRADE_LEVELS}
             </span>
-            ) in exchange for a permanent, stackable{' '}
-            <span className="text-[#00F0FF] font-semibold">Rebirth Tier</span>. Your unspent Mojo,
-            all-time Lifetime XP, and Codex unlocks are preserved.
+            ).
           </p>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono tabular-nums text-[#C0C0C0] pt-0.5">
-            <span>
-              Next Tier ({rebirthCount + 1}):{' '}
-              <strong className="text-[#FF1493]">+{(rebirthCount + 1) * 15}% Spell DMG</strong>
-            </span>
-            <span>·</span>
-            <span>
-              <strong className="text-[#E2E8F0]">+{(rebirthCount + 1) * 12}% Mojo Bounty</strong>
-            </span>
-            <span>·</span>
-            <span>
-              <strong className="text-[#00F0FF]">+{(rebirthCount + 1) * 10}% Max Hull</strong>
-            </span>
-            <span>·</span>
-            <span>
-              <strong className="text-[#FFB6D9]">+{(rebirthCount + 1) * 6}% Fire Haste</strong>
-            </span>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono tabular-nums text-[#D3D9EA]">
+            <span>Next Tier ({rebirthCount + 1}):</span>
+            <span className="text-[#FF1493]">+{(rebirthCount + 1) * 15}% Spell DMG</span>
+            <span aria-hidden="true">·</span>
+            <span>+{(rebirthCount + 1) * 12}% Mojo Bounty</span>
+            <span aria-hidden="true">·</span>
+            <span className="text-[#36F3EB]">+{(rebirthCount + 1) * 10}% Max Hull</span>
+            <span aria-hidden="true">·</span>
+            <span>+{(rebirthCount + 1) * 6}% Haste</span>
           </div>
         </div>
 
@@ -211,7 +194,7 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
             <button
               type="button"
               onClick={() => setConfirmRebirth(false)}
-              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-black border border-white/15 text-xs font-mono text-[#B8B8B8] hover:text-white"
+              className="min-h-[40px] px-3.5 py-2 rounded-lg bg-[#181722] border border-white/15 text-xs font-semibold text-[#B8B8B8] hover:text-white"
             >
               Cancel
             </button>
@@ -220,27 +203,28 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
             type="button"
             disabled={!canRebirth}
             onClick={handleRebirthClick}
-            className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-mono font-semibold transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
+            className={`min-h-[40px] px-4 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
               canRebirth
                 ? confirmRebirth
-                  ? 'bg-[#00F0FF] text-black hover:bg-[#66F7FF] cursor-pointer'
-                  : 'bg-[#1A1A1A] border border-[#00F0FF] text-[#00F0FF] hover:bg-[#00F0FF]/15 cursor-pointer'
-                : 'bg-black border border-white/10 text-[#5E5E5E] cursor-not-allowed'
+                  ? 'bg-[#36F3EB] text-black hover:bg-[#66F7FF] cursor-pointer'
+                  : 'bg-[#181722] border border-[#36F3EB]/60 text-[#36F3EB] hover:bg-[#36F3EB]/10 cursor-pointer'
+                : 'bg-[#07070B] border border-white/10 text-[#6B6E82] cursor-not-allowed'
             }`}
           >
             <Sparkles className="w-3.5 h-3.5" />
             <span>
               {!canRebirth
-                ? `Locked (Need Cycle Lv.20 or 15 Upgr)`
+                ? 'Need Lv.20 or 15 Upgr'
                 : confirmRebirth
-                  ? `Confirm Rebirth → Tier ${rebirthCount + 1} (Reset to Lv.1)`
-                  : `Ascend to Rebirth Tier ${rebirthCount + 1}`}
+                  ? `Confirm Tier ${rebirthCount + 1}`
+                  : `Ascend to Tier ${rebirthCount + 1}`}
             </span>
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      {/* Clean Quiet Upgrade Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
         {UPGRADE_SPECS.map((spec) => {
           const level = upgrades[spec.key];
           const isMax = level >= spec.maxLevel;
@@ -251,14 +235,14 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
           return (
             <div
               key={spec.key}
-              className="p-4 rounded-xl bg-[#111111] border border-[#9A0957]/45 hover:border-[#9A0957] transition-colors flex flex-col justify-between gap-3"
+              className="p-4 sm:p-5 rounded-xl bg-[#111018] border border-white/10 hover:border-white/20 transition-colors flex flex-col justify-between gap-3.5"
             >
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
-                  <h2 className="text-sm font-display font-bold text-white">
+                  <h2 className="text-sm sm:text-base font-display font-bold text-white">
                     {spec.label}
                   </h2>
-                  <span className="text-xs font-mono font-semibold text-[#FFB6D9] tabular-nums">
+                  <span className="text-xs font-mono font-semibold text-[#D3D9EA] tabular-nums">
                     Lv.{level}/{spec.maxLevel}
                   </span>
                 </div>
@@ -266,21 +250,21 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
                   {spec.summary}
                 </p>
 
-                {/* Segmented Level Progress Bar in BreBre Pink */}
+                {/* Segmented Level Progress Bar */}
                 <div className="flex items-center gap-1 pt-1">
                   {Array.from({ length: spec.maxLevel }).map((_, i) => (
                     <div
                       key={i}
                       className={`h-1.5 flex-1 rounded-sm ${
-                        i < level ? 'bg-[#FF1493]' : 'bg-[#1A1A1A] border border-[#5B0633]/60'
+                        i < level ? 'bg-[#FF1493]' : 'bg-[#1C1B26]'
                       }`}
                     />
                   ))}
                 </div>
               </div>
 
-              <div className="flex items-center justify-between gap-3 pt-2 border-t border-[#5B0633]/60">
-                <span className="text-xs font-mono text-[#C0C0C0] tabular-nums">
+              <div className="flex items-center justify-between gap-3 pt-3 border-t border-white/10">
+                <span className="text-xs font-mono text-[#D3D9EA] tabular-nums">
                   {spec.formatEffect(level)}
                 </span>
 
@@ -288,12 +272,12 @@ export const UpgradeLabView: React.FC<UpgradeLabViewProps> = ({
                   type="button"
                   onClick={() => handleBuy(spec)}
                   aria-disabled={!canAfford}
-                  className={`min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-mono font-semibold transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 ${
+                  className={`min-h-[38px] px-4 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 ${
                     isMax
-                      ? 'bg-[#1A1A1A] border border-[#5B0633] text-[#5E5E5E] cursor-default'
+                      ? 'bg-[#181722] border border-white/10 text-[#6B6E82] cursor-default'
                       : canAfford
                         ? 'bg-[#FF1493] hover:bg-[#CD0D72] text-white cursor-pointer'
-                        : 'bg-[#000000] border border-[#5B0633] text-[#B8B8B8] hover:border-[#9A0957]'
+                        : 'bg-[#07070B] border border-white/15 text-[#B8B8B8] hover:border-white/30'
                   }`}
                 >
                   {isMax ? (
