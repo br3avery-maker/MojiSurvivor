@@ -14,6 +14,14 @@ import {
   normalizePubkeyList,
   type EmojiFilterMode,
 } from './moderationLists';
+import { DEFAULT_BLOSSOM_SERVERS, sanitizeBlossomServerList } from './nsitePublisher';
+import {
+  DEFAULT_REALM_ID,
+  evaluateBackfilledUnlockedRealms,
+  mergeUnlockedRealms,
+  normalizeRealmId,
+  type RealmId,
+} from './realms';
 import { sanitizeDisplayText, sanitizeRelayUrl, sanitizeShortcode, sanitizeUrl } from './sanitizeUrl';
 
 export interface UpgradeLevels {
@@ -88,6 +96,7 @@ export interface RunReceiptRecord {
   careerXpEarned?: number;
   weaponsSummary: string;
   strongestSpellName?: string;
+  realmId?: RealmId;
   featuredEmoji?: FeaturedEmojiSummary;
   createdAt: number;
   status: ReceiptPublishStatus;
@@ -184,6 +193,18 @@ export interface PersistedGameState {
   totalBossKills?: number;
   totalRuns: number;
 
+  // Unlockable Arena Realms & Blossom/Nsite preferences
+  unlockedRealms?: RealmId[];
+  selectedRealmId?: RealmId;
+  preferredBlossomServers?: string[];
+  lastNsitePublish?: {
+    siteType: 'root' | 'named';
+    slug?: string;
+    eventId?: string;
+    gatewayUrl?: string;
+    publishedAt: number;
+  };
+
   // First-time Nostr relay content warning acknowledgment timestamp (`null` until accepted)
   contentWarningAcceptedAt: number | null;
 
@@ -207,6 +228,7 @@ export interface PersistedGameState {
  */
 export interface ActiveRunCheckpoint {
   runSessionId: string;
+  realmId?: RealmId;
   savedAt: number;
   wave: number;
   waveTimer: number;
@@ -444,6 +466,9 @@ export function createDefaultState(): PersistedGameState {
     totalKills: 0,
     totalBossKills: 0,
     totalRuns: 0,
+    unlockedRealms: [DEFAULT_REALM_ID],
+    selectedRealmId: DEFAULT_REALM_ID,
+    preferredBlossomServers: [...DEFAULT_BLOSSOM_SERVERS],
     contentWarningAcceptedAt: null,
     upgrades: {
       attack: 0,
@@ -618,6 +643,7 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
             : undefined,
         weaponsSummary: String(r.weaponsSummary ?? 'lightning_zap:1'),
         strongestSpellName: r.strongestSpellName ? String(r.strongestSpellName) : undefined,
+        realmId: r.realmId ? normalizeRealmId(r.realmId) : undefined,
         featuredEmoji: cleanFeatured,
         createdAt: Math.max(0, Math.floor(Number(r.createdAt ?? 0) || 0)),
         status:
@@ -891,6 +917,35 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
   const ledgerScoreSum = Object.values(creditedRuns).reduce((acc, r) => acc + (r.score || 0), 0);
   const ledgerBossSum = Object.values(creditedRuns).reduce((acc, r) => acc + (r.bosses || 0), 0);
 
+  const computedBestWave = Math.max(
+    rawBestWave,
+    localReceipts.reduce((m, r) => Math.max(m, r.wave), 1)
+  );
+  const computedTotalBossKills = Math.max(rawTotalBossKills, receiptsBossFloor, ledgerBossSum);
+  const unlockedRealms = evaluateBackfilledUnlockedRealms({
+    existingUnlocked: Array.isArray(src.unlockedRealms)
+      ? src.unlockedRealms.filter((r): r is string => typeof r === 'string')
+      : undefined,
+    bestWave: computedBestWave,
+    totalBossKills: computedTotalBossKills,
+    runs: localReceipts,
+  });
+  const candidateSelectedRealm = normalizeRealmId(src.selectedRealmId);
+  const selectedRealmId = unlockedRealms.includes(candidateSelectedRealm)
+    ? candidateSelectedRealm
+    : DEFAULT_REALM_ID;
+
+  const cleanedBlossomServers = Array.isArray(src.preferredBlossomServers)
+    ? sanitizeBlossomServerList(
+        src.preferredBlossomServers.filter((s): s is string => typeof s === 'string')
+      )
+    : [];
+
+  const rawLastPublish =
+    src.lastNsitePublish && typeof src.lastNsitePublish === 'object'
+      ? (src.lastNsitePublish as PersistedGameState['lastNsitePublish'])
+      : undefined;
+
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     revision: Math.max(0, Math.floor(Number(src.revision ?? 1) || 1)),
@@ -911,13 +966,15 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
       localReceipts.reduce((m, r) => Math.max(m, r.score), 0)
     ),
     lifetimeScore: Math.max(rawLifetimeScore, receiptsScoreSum, ledgerScoreSum, rawHighScore),
-    bestWave: Math.max(
-      rawBestWave,
-      localReceipts.reduce((m, r) => Math.max(m, r.wave), 1)
-    ),
+    bestWave: computedBestWave,
     totalKills: Math.max(rawTotalKills, codexKillsFloor),
-    totalBossKills: Math.max(rawTotalBossKills, receiptsBossFloor, ledgerBossSum),
+    totalBossKills: computedTotalBossKills,
     totalRuns: Math.max(rawTotalRuns, localReceipts.length),
+    unlockedRealms,
+    selectedRealmId,
+    preferredBlossomServers:
+      cleanedBlossomServers.length > 0 ? cleanedBlossomServers : [...DEFAULT_BLOSSOM_SERVERS],
+    lastNsitePublish: rawLastPublish,
     upgrades,
     codex,
     blockedEmojiKeys,
@@ -1135,6 +1192,20 @@ export function reconcileProgressionStates(
   const ledgerScoreSum = Object.values(mergedCreditedRuns).reduce((s, r) => s + (r.score || 0), 0);
   const ledgerBossSum = Object.values(mergedCreditedRuns).reduce((s, r) => s + (r.bosses || 0), 0);
 
+  const mergedBestWave = Math.max(local.bestWave, incoming.bestWave);
+  const mergedBossKills = Math.max(
+    local.totalBossKills ?? 0,
+    incoming.totalBossKills ?? 0,
+    ledgerBossSum
+  );
+  const mergedRealms = evaluateBackfilledUnlockedRealms({
+    existingUnlocked: mergeUnlockedRealms(local.unlockedRealms, incoming.unlockedRealms),
+    bestWave: mergedBestWave,
+    totalBossKills: mergedBossKills,
+    runs: mergedReceipts,
+  });
+  const candidateSelected = normalizeRealmId(newer.selectedRealmId ?? local.selectedRealmId);
+
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     revision: Math.max(local.revision, incoming.revision) + 1,
@@ -1159,19 +1230,24 @@ export function reconcileProgressionStates(
       local.highScore,
       incoming.highScore
     ),
-    bestWave: Math.max(local.bestWave, incoming.bestWave),
+    bestWave: mergedBestWave,
     totalKills: Math.max(local.totalKills, incoming.totalKills, codexKillsSum),
-    totalBossKills: Math.max(
-      local.totalBossKills ?? 0,
-      incoming.totalBossKills ?? 0,
-      ledgerBossSum
-    ),
+    totalBossKills: mergedBossKills,
     totalRuns: Math.max(
       local.totalRuns,
       incoming.totalRuns,
       completedLedgerRuns,
       mergedReceipts.length
     ),
+    unlockedRealms: mergedRealms,
+    selectedRealmId: mergedRealms.includes(candidateSelected)
+      ? candidateSelected
+      : DEFAULT_REALM_ID,
+    preferredBlossomServers:
+      newer.preferredBlossomServers && newer.preferredBlossomServers.length > 0
+        ? newer.preferredBlossomServers
+        : local.preferredBlossomServers ?? [...DEFAULT_BLOSSOM_SERVERS],
+    lastNsitePublish: newer.lastNsitePublish ?? local.lastNsitePublish,
     upgrades: effectiveUpgrades,
     codex: mergedCodex,
     blockedEmojiKeys: mergedBlockedEmojiKeys,
@@ -1391,6 +1467,23 @@ export function performCareerRebirth(prev: PersistedGameState): {
   };
 }
 
+export function unlockRealmInState(
+  prev: PersistedGameState,
+  realmId: RealmId
+): PersistedGameState {
+  const existing = mergeUnlockedRealms(prev.unlockedRealms);
+  if (existing.includes(realmId)) return prev;
+  return {
+    ...prev,
+    revision: prev.revision + 1,
+    updatedAt: Date.now(),
+    unlockedRealms: mergeUnlockedRealms(existing, [realmId]),
+    progressSync: prev.progressSync.enabled
+      ? { ...prev.progressSync, dirty: true }
+      : prev.progressSync,
+  };
+}
+
 /**
  * Reconciles verified `kind: 30078` run receipts fetched from Nostr relays for the active player
  * back into their local receipts, high-water marks (`highScore`, `bestWave`), and career totals
@@ -1409,6 +1502,7 @@ export function mergeOwnRelayRunsIntoState(
     durationSec: number;
     runHash: string;
     weapons: string;
+    realmId?: RealmId;
     createdAt: number;
     rawEvent: NostrEvent;
     featuredEmoji?: FeaturedEmojiSummary;
@@ -1443,6 +1537,7 @@ export function mergeOwnRelayRunsIntoState(
         mojoEarned: Math.max(5, Math.floor(rel.defeated * 0.4 + rel.wave * 8 + rel.bosses * 25)),
         careerXpEarned: rel.defeated * 4 + rel.wave * 20 + rel.bosses * 75,
         weaponsSummary: rel.weapons,
+        realmId: rel.realmId,
         featuredEmoji: rel.featuredEmoji,
         createdAt: rel.createdAt,
         status: 'confirmed',
@@ -1472,6 +1567,7 @@ export function mergeOwnRelayRunsIntoState(
       if (idx !== -1) {
         mergedReceipts[idx] = {
           ...prevRec,
+          realmId: prevRec.realmId ?? rel.realmId,
           status: 'confirmed',
           signedEvent: rel.rawEvent,
           acceptedRelays:
@@ -1508,8 +1604,18 @@ export function mergeOwnRelayRunsIntoState(
   const nextTotalKills = Math.max(prev.totalKills, receiptsKillsSum);
   const nextTotalBossKills = Math.max(prev.totalBossKills ?? 0, receiptsBossSum);
 
+  const prevRealms = mergeUnlockedRealms(prev.unlockedRealms);
+  const nextRealms = evaluateBackfilledUnlockedRealms({
+    existingUnlocked: prevRealms,
+    bestWave: nextBestWave,
+    totalBossKills: nextTotalBossKills,
+    runs: sortedReceipts,
+  });
+  const realmsChanged = nextRealms.length !== prevRealms.length;
+
   if (
     !changed &&
+    !realmsChanged &&
     nextHighScore === prev.highScore &&
     nextBestWave === prev.bestWave &&
     nextLifetimeScore === (prev.lifetimeScore ?? 0) &&
@@ -1530,6 +1636,7 @@ export function mergeOwnRelayRunsIntoState(
     totalKills: nextTotalKills,
     totalBossKills: nextTotalBossKills,
     totalRuns: allCompletedRuns,
+    unlockedRealms: nextRealms,
     localReceipts: sortedReceipts,
     creditedRuns: mergedCredited,
   };

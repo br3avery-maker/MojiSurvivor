@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, RotateCcw, AlertTriangle, ArrowRight } from 'lucide-react';
+import { Play, RotateCcw, AlertTriangle, ArrowRight, Lock } from 'lucide-react';
 import { ArenaView } from './components/ArenaView';
 import { CodexView } from './components/CodexView';
 import { FirstLoadWarningModal } from './components/FirstLoadWarningModal';
@@ -25,10 +25,18 @@ import {
   type EmojiFilterMode,
 } from './lib/moderationLists';
 import { formatShortNpub, MojiNostrCoordinator } from './lib/nostrEngine';
+import { sanitizeBlossomServerList } from './lib/nsitePublisher';
 import {
   getLobbyPixelBannerDataUrl,
   MOJI_APP_ICON_URL,
 } from './lib/pixelBackgrounds';
+import {
+  DEFAULT_REALM_ID,
+  getRealmSpec,
+  mergeUnlockedRealms,
+  REALM_CATALOG,
+  type RealmId,
+} from './lib/realms';
 import {
   applyRunCheckpointToState,
   getUpgradeCost,
@@ -42,6 +50,7 @@ import {
   savePendingPostRunSession,
   savePersistedState,
   traitToCodexRecord,
+  unlockRealmInState,
   type ActiveRunCheckpoint,
   type CodexViewMode,
   type GameSettings,
@@ -615,6 +624,7 @@ export default function App() {
         careerXpEarned: summary.careerXpEarned,
         weaponsSummary: summary.weaponsSummary,
         strongestSpellName: summary.strongestSpellName,
+        realmId: summary.realmId,
         featuredEmoji: summary.featuredEmoji,
         createdAt,
         status: 'unsigned_local',
@@ -858,6 +868,71 @@ export default function App() {
       commitPersisted((prev) => ({ ...prev, settings }), { immediate: true });
     },
     [commitPersisted, coordinator]
+  );
+
+  const handleSelectRealm = useCallback(
+    (realmId: RealmId) => {
+      const unlocked = mergeUnlockedRealms(persistedRef.current.unlockedRealms);
+      if (!unlocked.includes(realmId)) {
+        const spec = getRealmSpec(realmId);
+        setGlobalNotice(`${spec.name} unlocks permanently after ${spec.unlockRequirementLabel}.`);
+        return;
+      }
+      commitPersisted(
+        (prev) => ({
+          ...prev,
+          selectedRealmId: realmId,
+        }),
+        { immediate: true }
+      );
+    },
+    [commitPersisted]
+  );
+
+  const handleRealmUnlocked = useCallback(
+    (realmId: RealmId) => {
+      const prevUnlocked = mergeUnlockedRealms(persistedRef.current.unlockedRealms);
+      const alreadyUnlocked = prevUnlocked.includes(realmId);
+      const updatedState = commitPersisted((prev) => unlockRealmInState(prev, realmId), {
+        immediate: true,
+      });
+      if (!alreadyUnlocked) {
+        const spec = getRealmSpec(realmId);
+        setGlobalNotice(`Realm Unlocked: ${spec.name} (${spec.tagline})`);
+        if (updatedState.progressSync.enabled && coordinator.signerMode !== 'nip55') {
+          void syncProgressSnapshotToRelays();
+        }
+      }
+    },
+    [commitPersisted, coordinator.signerMode, syncProgressSnapshotToRelays]
+  );
+
+  const handleUpdateBlossomServers = useCallback(
+    (servers: string[]) => {
+      const clean = sanitizeBlossomServerList(servers);
+      if (clean.length === 0) return;
+      commitPersisted(
+        (prev) => ({
+          ...prev,
+          preferredBlossomServers: clean,
+        }),
+        { immediate: true }
+      );
+    },
+    [commitPersisted]
+  );
+
+  const handleRecordNsitePublish = useCallback(
+    (record: NonNullable<PersistedGameState['lastNsitePublish']>) => {
+      commitPersisted(
+        (prev) => ({
+          ...prev,
+          lastNsitePublish: record,
+        }),
+        { immediate: true }
+      );
+    },
+    [commitPersisted]
   );
 
   const handleAcceptContentWarning = useCallback(
@@ -1361,6 +1436,7 @@ export default function App() {
         playerXp={persisted.playerXp}
         playerXpNext={persisted.playerXpNext}
         rebirthCount={persisted.rebirthCount}
+        realmId={persisted.selectedRealmId ?? DEFAULT_REALM_ID}
         upgrades={persisted.upgrades}
         settings={persisted.settings}
         defaultAvatarUrl={defaultAvatarUrl}
@@ -1368,6 +1444,7 @@ export default function App() {
         initialCompletedReceipt={arenaInitialReceipt}
         onEnemyDefeated={handleEnemyDefeated}
         onCheckpointProgress={handleCheckpointProgress}
+        onRealmUnlocked={handleRealmUnlocked}
         onSaveActiveRunCheckpoint={handleSaveActiveRunCheckpoint}
         onRunCompleted={handleRunCompleted}
         onReceiptUpdated={handleReceiptUpdated}
@@ -1626,6 +1703,66 @@ export default function App() {
               </div>
             </div>
 
+            {/* Arena Realm Selector */}
+            <div className="rounded-xl bg-[#111018] border border-white/10 p-3 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-display font-bold text-white">Arena Realm</span>
+                <span className="font-mono text-[11px] text-[#94A3B8]">
+                  Defeat Wave 5 · 10 · 15 Apex Bosses to unlock permanently
+                </span>
+              </div>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                {REALM_CATALOG.map((realm) => {
+                  const unlockedList = mergeUnlockedRealms(persisted.unlockedRealms);
+                  const isUnlocked = unlockedList.includes(realm.id);
+                  const activeRealmId = persisted.selectedRealmId ?? DEFAULT_REALM_ID;
+                  const isSelected = activeRealmId === realm.id;
+                  return (
+                    <button
+                      key={realm.id}
+                      type="button"
+                      aria-pressed={isSelected}
+                      disabled={!isUnlocked}
+                      onClick={() => handleSelectRealm(realm.id)}
+                      style={
+                        isSelected
+                          ? { borderColor: realm.accentHex }
+                          : undefined
+                      }
+                      className={`min-h-[60px] text-left p-2.5 rounded-lg border transition-colors ${
+                        !isUnlocked
+                          ? 'bg-[#07070B] border-white/10 text-[#64748B] cursor-not-allowed opacity-75'
+                          : isSelected
+                            ? 'bg-[#0B0A12] text-white'
+                            : 'bg-[#0B0A12] border-white/10 text-[#CBD5E1] hover:border-white/30'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span className="text-xs font-semibold truncate">
+                          {realm.name}
+                        </span>
+                        {!isUnlocked ? (
+                          <Lock className="w-3.5 h-3.5 text-[#94A3B8] shrink-0" />
+                        ) : (
+                          isSelected && (
+                            <span
+                              className="text-[10px] font-mono font-semibold shrink-0"
+                              style={{ color: realm.accentHex }}
+                            >
+                              ACTIVE
+                            </span>
+                          )
+                        )}
+                      </div>
+                      <div className="text-[11px] font-mono tabular-nums text-[#94A3B8] mt-1 truncate">
+                        {isUnlocked ? realm.tagline : realm.unlockRequirementLabel}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Single Horizontal Hairline Stat Strip */}
             <div className="grid grid-cols-2 sm:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-white/10 rounded-xl bg-[#111018] border border-white/10 font-mono tabular-nums">
               <div className="px-4 py-3">
@@ -1769,6 +1906,8 @@ export default function App() {
             onRestoreProgressFromRelays={() => restoreProgressFromRelays(false)}
             onUpdateRelays={handleUpdateRelays}
             onUpdateSettings={handleUpdateSettings}
+            onUpdateBlossomServers={handleUpdateBlossomServers}
+            onRecordNsitePublish={handleRecordNsitePublish}
             onReportAndBanAuthor={handleReportAndBanAuthor}
             onUnbanAuthor={handleUnbanAuthor}
             onReportAndBanEmojiHash={handleReportAndBanEmojiHash}

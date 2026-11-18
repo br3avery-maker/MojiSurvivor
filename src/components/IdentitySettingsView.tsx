@@ -18,6 +18,7 @@ import {
   ShieldCheck,
   Ban,
   Hash,
+  Rocket,
 } from 'lucide-react';
 import {
   getBuiltInBannedHashesSet,
@@ -44,9 +45,10 @@ import type {
   NostrProgressSyncState,
   PersistedGameState,
 } from '../lib/storage';
+import { NsitePublisherPanel } from './NsitePublisherPanel';
 import { PlayerTradingCard } from './PlayerTradingCard';
 
-export type AccordionPanel = 'profile' | 'relays' | 'moderation' | 'game';
+export type AccordionPanel = 'profile' | 'relays' | 'moderation' | 'publish' | 'game';
 
 interface IdentitySettingsViewProps {
   coordinator: MojiNostrCoordinator;
@@ -74,6 +76,8 @@ interface IdentitySettingsViewProps {
   onRestoreProgressFromRelays: () => Promise<{ ok: boolean; message: string }>;
   onUpdateRelays: (relays: string[]) => void;
   onUpdateSettings: (next: GameSettings) => void;
+  onUpdateBlossomServers?: (servers: string[]) => void;
+  onRecordNsitePublish?: (record: NonNullable<PersistedGameState['lastNsitePublish']>) => void;
   onReportAndBanAuthor: (opts: {
     pubkeyOrNpub: string;
     packTitle?: string;
@@ -131,6 +135,8 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
   onRestoreProgressFromRelays,
   onUpdateRelays,
   onUpdateSettings,
+  onUpdateBlossomServers,
+  onRecordNsitePublish,
   onReportAndBanAuthor,
   onUnbanAuthor,
   onReportAndBanEmojiHash,
@@ -2036,6 +2042,44 @@ export const IdentitySettingsView: React.FC<IdentitySettingsViewProps> = ({
                 );
               })}
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* ACCORDION 5: PUBLISH / CLONE NSITE */}
+      <div className="rounded-xl bg-[#111018] border border-white/10 overflow-hidden">
+        <button
+          type="button"
+          aria-expanded={openPanel === 'publish'}
+          onClick={() => togglePanel('publish')}
+          className="w-full min-h-[48px] px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-white/[0.02] transition-colors"
+        >
+          <span className="text-sm font-display font-bold text-white inline-flex items-center gap-2 whitespace-nowrap">
+            <Rocket className="w-4 h-4 text-[#00F0FF]" />
+            <span>Publish / Clone Nsite</span>
+          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono text-[#B8B8B8]">
+              NIP-5A · Blossom
+            </span>
+            <ChevronDown
+              className={`w-4 h-4 text-[#B8B8B8] shrink-0 transition-transform duration-150 ${
+                openPanel === 'publish' ? 'rotate-180 text-[#FF1493]' : ''
+              }`}
+            />
+          </div>
+        </button>
+
+        {openPanel === 'publish' && (
+          <div className="px-4 pb-4 pt-3 border-t border-white/10">
+            <NsitePublisherPanel
+              coordinator={coordinator}
+              relays={relays}
+              preferredBlossomServers={persistedState?.preferredBlossomServers}
+              lastNsitePublish={persistedState?.lastNsitePublish}
+              onUpdateBlossomServers={onUpdateBlossomServers}
+              onRecordNsitePublish={onRecordNsitePublish}
+            />
           </div>
         )}
       </div>

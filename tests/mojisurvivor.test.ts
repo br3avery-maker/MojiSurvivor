@@ -24,6 +24,21 @@ import {
   validateNip46PairingResponse,
   verifySignedEventMatchesRequest,
 } from '../src/lib/nostrEngine';
+import {
+  buildBatchedBlossomUploadAuthTemplate,
+  buildBlossomServerListTemplate,
+  buildLegacy34128FileTemplates,
+  buildNip5aManifestTemplate,
+  buildSingleBlossomUploadAuthTemplate,
+  computeNsiteGatewayUrls,
+  computeSha256Hex,
+  isValidSiteSlug,
+  normalizeSiteSlug,
+} from '../src/lib/nsitePublisher';
+import {
+  evaluateBackfilledUnlockedRealms,
+  getRealmUnlockedForBossWave,
+} from '../src/lib/realms';
 import { buildScoreSummaryText } from '../src/lib/scoreCardRenderer';
 import {
   applyRunCheckpointToState,
@@ -38,6 +53,7 @@ import {
   saveActiveRunCheckpoint,
   savePersistedState,
   traitToCodexRecord,
+  unlockRealmInState,
   UPGRADE_SPECS,
   type PersistedGameState,
   type RunReceiptRecord,
@@ -1092,4 +1108,231 @@ describe('MojiSurvivor — Progression Persistence, Nostr Sync & Signer Security
     assert.equal(reconciledAfterRebirth.upgrades.attack, 0);
     assert.equal(reconciledAfterRebirth.mojoBalance, 200);
   });
+
+  it('12. Unlocks Arena Realms permanently via Wave 5/10/15 Apex Boss defeats, preserves them across Rebirth & cross-device merges, and backfills historical runs', () => {
+    assert.equal(getRealmUnlockedForBossWave(4), null);
+    assert.equal(getRealmUnlockedForBossWave(5), 'circuit_labyrinth');
+    assert.equal(getRealmUnlockedForBossWave(10), 'starlight_rift');
+    assert.equal(getRealmUnlockedForBossWave(15), 'citadel_core');
+
+    let base = createDefaultState();
+    assert.deepEqual(base.unlockedRealms, ['obsidian_foundry']);
+    base = unlockRealmInState(base, 'circuit_labyrinth');
+    base = unlockRealmInState(base, 'starlight_rift');
+    assert.deepEqual(base.unlockedRealms, [
+      'obsidian_foundry',
+      'circuit_labyrinth',
+      'starlight_rift',
+    ]);
+    // Idempotent second call should return identical reference
+    assert.equal(unlockRealmInState(base, 'circuit_labyrinth'), base);
+
+    // Rebirth keeps unlocked realms & selected realm
+    const withRebirthReady: PersistedGameState = {
+      ...base,
+      playerLevel: 20,
+      selectedRealmId: 'starlight_rift',
+    };
+    const rebirth = performCareerRebirth(withRebirthReady);
+    assert.equal(rebirth.ok, true);
+    assert.equal(rebirth.nextState.selectedRealmId, 'starlight_rift');
+    assert.deepEqual(rebirth.nextState.unlockedRealms, [
+      'obsidian_foundry',
+      'circuit_labyrinth',
+      'starlight_rift',
+    ]);
+
+    // Cross-device reconcile takes the union of unlockedRealms
+    const remoteState: PersistedGameState = {
+      ...createDefaultState(),
+      unlockedRealms: ['obsidian_foundry', 'citadel_core'],
+    };
+    const merged = reconcileProgressionStates(withRebirthReady, remoteState);
+    assert.deepEqual(merged.unlockedRealms, [
+      'obsidian_foundry',
+      'circuit_labyrinth',
+      'starlight_rift',
+      'citadel_core',
+    ]);
+
+    // Historical runs backfill realms cleanly without granting unlocks for zero-boss XP grinds
+    assert.deepEqual(
+      evaluateBackfilledUnlockedRealms({
+        bestWave: 12,
+        totalBossKills: 0,
+        runs: [{ wave: 12, bossesDefeated: 0 }],
+      }),
+      ['obsidian_foundry']
+    );
+    assert.deepEqual(
+      evaluateBackfilledUnlockedRealms({
+        bestWave: 15,
+        totalBossKills: 2,
+        runs: [{ wave: 15, bossesDefeated: 1 }],
+      }),
+      ['obsidian_foundry', 'circuit_labyrinth', 'starlight_rift', 'citadel_core']
+    );
+  });
+
+  it('13. Emits and verifies ["map", realmId] tags on kind:30078 run receipts and preserves unlockedRealms in progress snapshots', () => {
+    const sk = generateSecretKey();
+    const pubkey = getPublicKey(sk).toLowerCase();
+    const coord = new MojiNostrCoordinator(['wss://relay.primal.net'], {}, { disableNetwork: true });
+    assert.equal(coord.importNsecKey(nip19.nsecEncode(sk)).ok, true);
+
+    const receipt: RunReceiptRecord = {
+      localId: 'r-citadel',
+      runHash: 'abcdef123456',
+      dTag: 'mojisurvivor:run:1793000000:abcdef123456',
+      pubkey,
+      score: 88_400,
+      wave: 16,
+      defeated: 640,
+      bossesDefeated: 3,
+      durationSec: 495,
+      mojoEarned: 92,
+      weaponsSummary: 'plasma_lance:4,nova_pulse:3',
+      realmId: 'citadel_core',
+      createdAt: 1793000000,
+      status: 'unsigned_local',
+      acceptedRelays: [],
+      rejectedRelays: {},
+    };
+
+    const unsigned = coord.buildUnsignedRunTemplate(receipt, pubkey);
+    assert.ok(
+      unsigned.tags.some((t) => t[0] === 'map' && t[1] === 'citadel_core'),
+      'Unsigned run template must include ["map", realmId] tag'
+    );
+
+    const signed = finalizeEvent(unsigned, sk);
+    const verified = coord.parseVerifiedScoreEvent(signed, 'relay');
+    assert.ok(verified);
+    assert.equal(verified.realmId, 'citadel_core');
+
+    // Progress snapshot preserves unlockedRealms & selectedRealmId
+    const progState: PersistedGameState = {
+      ...createDefaultState(),
+      unlockedRealms: ['obsidian_foundry', 'circuit_labyrinth', 'citadel_core'],
+      selectedRealmId: 'citadel_core',
+    };
+    const progTmpl = coord.buildUnsignedProgressTemplate(progState);
+    const signedProg = finalizeEvent(progTmpl, sk);
+    const parsedProg = coord.parseVerifiedProgressSnapshot(signedProg);
+    assert.ok(parsedProg);
+    assert.equal(parsedProg.state.selectedRealmId, 'citadel_core');
+    assert.deepEqual(parsedProg.state.unlockedRealms, [
+      'obsidian_foundry',
+      'circuit_labyrinth',
+      'citadel_core',
+    ]);
+  });
+
+  it('14. Builds valid NIP-5A root (kind:15128) & named (kind:35128) manifests, BUD-11 kind:24242 auth, kind:10063 Blossom lists, and gateway URLs', async () => {
+    assert.equal(normalizeSiteSlug('  Moji Survivor!!  '), 'moji-survivor');
+    assert.equal(isValidSiteSlug('mojisurvivor'), true);
+    assert.equal(isValidSiteSlug('moji-game-13'), true);
+    assert.equal(isValidSiteSlug('too-long-slug-14'), false);
+    assert.equal(isValidSiteSlug('UPPER'), false);
+
+    const indexBytes = new TextEncoder().encode('<!doctype html><html></html>');
+    const jsBytes = new TextEncoder().encode('console.log("moji");');
+    const indexSha = await computeSha256Hex(indexBytes);
+    const jsSha = await computeSha256Hex(jsBytes);
+    assert.equal(indexSha.length, 64);
+
+    // BUD-11 batched + single-x auth templates
+    const batchAuth = buildBatchedBlossomUploadAuthTemplate([indexSha, jsSha, indexSha], {
+      createdAtSec: 1793000100,
+      ttlSec: 600,
+    });
+    assert.equal(batchAuth.kind, 24242);
+    assert.deepEqual(
+      batchAuth.tags.filter((t) => t[0] === 'x').map((t) => t[1]),
+      [indexSha, jsSha]
+    );
+    assert.ok(
+      batchAuth.tags.some((t) => t[0] === 'expiration' && t[1] === '1793000700')
+    );
+
+    const singleAuth = buildSingleBlossomUploadAuthTemplate(jsSha, {
+      createdAtSec: 1793000100,
+    });
+    assert.deepEqual(
+      singleAuth.tags.filter((t) => t[0] === 'x').map((t) => t[1]),
+      [jsSha]
+    );
+
+    // NIP-5A Root manifest (kind:15128, strictly NO d-tag)
+    const rootManifest = buildNip5aManifestTemplate({
+      siteType: 'root',
+      files: [
+        { path: '/assets/app.js', sha256: jsSha },
+        { path: 'index.html', sha256: indexSha },
+      ],
+      createdAtSec: 1793000200,
+    });
+    assert.equal(rootManifest.kind, 15128);
+    assert.equal(
+      rootManifest.tags.some((t) => t[0] === 'd'),
+      false,
+      'Root kind:15128 manifest must never emit a d tag'
+    );
+    assert.deepEqual(
+      rootManifest.tags.filter((t) => t[0] === 'path'),
+      [
+        ['path', '/assets/app.js', jsSha],
+        ['path', '/index.html', indexSha],
+      ]
+    );
+
+    // NIP-5A Named manifest (kind:35128, valid d-tag)
+    const namedManifest = buildNip5aManifestTemplate({
+      siteType: 'named',
+      slug: 'mojisurvivor',
+      files: [{ path: '/index.html', sha256: indexSha }],
+      createdAtSec: 1793000200,
+    });
+    assert.equal(namedManifest.kind, 35128);
+    assert.ok(namedManifest.tags.some((t) => t[0] === 'd' && t[1] === 'mojisurvivor'));
+
+    // Legacy kind:34128 per-path events
+    const legacyEvents = buildLegacy34128FileTemplates(
+      [{ path: '/index.html', sha256: indexSha }],
+      1793000200
+    );
+    assert.equal(legacyEvents.length, 1);
+    assert.equal(legacyEvents[0].kind, 34128);
+    assert.ok(legacyEvents[0].tags.some((t) => t[0] === 'd' && t[1] === '/index.html'));
+    assert.ok(legacyEvents[0].tags.some((t) => t[0] === 'x' && t[1] === indexSha));
+
+    // kind:10063 Blossom server list
+    const blossomList = buildBlossomServerListTemplate([
+      'https://blossom.primal.net/',
+      'http://evil.insecure.example',
+      'https://cdn.satellite.earth',
+    ]);
+    assert.equal(blossomList.kind, 10063);
+    assert.deepEqual(blossomList.tags, [
+      ['server', 'https://blossom.primal.net'],
+      ['server', 'https://cdn.satellite.earth'],
+    ]);
+
+    // Gateway URL computation
+    const testPub = getPublicKey(generateSecretKey()).toLowerCase();
+    const expectedNpub = nip19.npubEncode(testPub);
+    const rootLinks = computeNsiteGatewayUrls(testPub, 'root');
+    assert.equal(rootLinks.primaryUrl, `https://${expectedNpub}.nsite.lol/`);
+    assert.equal(rootLinks.naddr, undefined);
+
+    const namedLinks = computeNsiteGatewayUrls(testPub, 'named', 'mojisurvivor', [
+      'wss://relay.primal.net',
+    ]);
+    assert.equal(
+      namedLinks.primaryUrl,
+      `https://${expectedNpub}-mojisurvivor.nsite.lol/`
+    );
+    assert.ok(namedLinks.naddr?.startsWith('naddr1'));
+  });
 });
+

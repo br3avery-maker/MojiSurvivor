@@ -22,6 +22,12 @@ import {
 } from '../lib/gameEngine';
 import type { MojiNostrCoordinator, NostrProfileMeta } from '../lib/nostrEngine';
 import {
+  DEFAULT_REALM_ID,
+  getRealmSpec,
+  normalizeRealmId,
+  type RealmId,
+} from '../lib/realms';
+import {
   savePendingPostRunSession,
   type ActiveRunCheckpoint,
   type GameSettings,
@@ -37,6 +43,7 @@ interface ArenaViewProps {
   playerXp: number;
   playerXpNext: number;
   rebirthCount?: number;
+  realmId?: RealmId;
   upgrades: UpgradeLevels;
   settings: GameSettings;
   defaultAvatarUrl: string;
@@ -44,6 +51,7 @@ interface ArenaViewProps {
   initialCompletedReceipt?: RunReceiptRecord | null;
   onEnemyDefeated: (trait: EmojiCombatTrait) => void;
   onCheckpointProgress: (payload: RunProgressCheckpointPayload) => void;
+  onRealmUnlocked?: (realmId: RealmId) => void;
   onSaveActiveRunCheckpoint: (checkpoint: ActiveRunCheckpoint | null) => void;
   onRunCompleted: (summary: CompletedRunSummary) => RunReceiptRecord;
   onReceiptUpdated: (updated: RunReceiptRecord) => void;
@@ -59,6 +67,7 @@ function formatDuration(sec: number): string {
 function receiptToCompletedSummary(rec: RunReceiptRecord): CompletedRunSummary {
   return {
     runSessionId: rec.runSessionId || rec.localId,
+    realmId: normalizeRealmId(rec.realmId),
     score: rec.score,
     wave: rec.wave,
     defeated: rec.defeated,
@@ -77,6 +86,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
   profile,
   playerLevel,
   rebirthCount = 0,
+  realmId = DEFAULT_REALM_ID,
   upgrades,
   settings,
   defaultAvatarUrl,
@@ -84,11 +94,17 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
   initialCompletedReceipt,
   onEnemyDefeated,
   onCheckpointProgress,
+  onRealmUnlocked,
   onSaveActiveRunCheckpoint,
   onRunCompleted,
   onReceiptUpdated,
   onExitToLobby,
 }) => {
+  const effectiveRealmId = normalizeRealmId(
+    initialCheckpoint?.realmId ?? initialCompletedReceipt?.realmId ?? realmId
+  );
+  const initialRealmSpec = getRealmSpec(effectiveRealmId);
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<MojiSurvivorEngine | null>(null);
   const defaultAvatarImgRef = useRef<HTMLImageElement | null>(null);
@@ -110,6 +126,9 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
   const [nip55SignedInput, setNip55SignedInput] = useState('');
 
   const [hud, setHud] = useState<ArenaHudSnapshot>({
+    realmId: effectiveRealmId,
+    realmName: initialRealmSpec.shortName,
+    overchargeActive: false,
     hp: initialCheckpoint?.playerHp ?? 100,
     maxHp: initialCheckpoint?.playerMaxHp ?? 100,
     level: initialCheckpoint?.spellLevel ?? 1,
@@ -202,6 +221,9 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
         onCheckpointProgress: (payload) => {
           onCheckpointProgress(payload);
         },
+        onRealmUnlocked: (unlockedId) => {
+          onRealmUnlocked?.(unlockedId);
+        },
         onGameOver: (summary) => {
           gameOverRef.current = true;
           onSaveActiveRunCheckpoint(null);
@@ -216,7 +238,8 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
       },
       checkpointToLoad,
       playerLevel,
-      rebirthCount
+      rebirthCount,
+      effectiveRealmId
     );
 
     engineRef.current = engine;
@@ -441,11 +464,11 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
             </div>
           </div>
 
-          {/* Center: Wave, Score & Banked Mojo */}
+          {/* Center: Wave · Realm, Score & Banked Mojo */}
           <div className="flex items-center gap-3 sm:gap-6 text-center font-mono tabular-nums">
             <div>
-              <div className="text-[10px] text-[#B8B8B8]">Wave</div>
-              <div className="text-sm sm:text-base font-semibold text-white">{hud.wave}</div>
+              <div className="text-[10px] text-[#B8B8B8] truncate">{hud.realmName}</div>
+              <div className="text-sm sm:text-base font-semibold text-white">W{hud.wave}</div>
             </div>
             <div>
               <div className="text-[10px] text-[#B8B8B8]">Score</div>
@@ -502,10 +525,14 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
           </div>
         )}
 
-        {(hud.buffs.speedRemaining > 0 ||
+        {(hud.overchargeActive ||
+          hud.buffs.speedRemaining > 0 ||
           hud.buffs.shieldHits > 0 ||
           hud.buffs.furyRemaining > 0) && (
           <div className="max-w-5xl mx-auto mt-1.5 flex items-center gap-3 text-[11px] font-mono tabular-nums">
+            {hud.overchargeActive && (
+              <span className="text-[#E2E8F0] font-semibold">Overcharge +25% Haste</span>
+            )}
             {hud.buffs.speedRemaining > 0 && (
               <span className="text-[#00F0FF]">
                 Speed {Math.ceil(hud.buffs.speedRemaining)}s
@@ -594,7 +621,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
           <div className="w-full max-w-xs rounded-2xl bg-[#111111] border-2 border-[#FF1493] p-4 shadow-2xl">
             <h2 className="text-lg font-display font-bold text-white">Run Paused</h2>
             <p className="text-xs text-[#B8B8B8] mb-1 font-mono tabular-nums">
-              Wave {hud.wave} · {hud.score.toLocaleString()} pts · +{hud.mojoEarned} Mojo
+              {getRealmSpec(hud.realmId).name} · Wave {hud.wave} · {hud.score.toLocaleString()} pts · +{hud.mojoEarned} Mojo
             </p>
             <p className="text-[11px] text-[#FFB6D9] mb-3">
               Collected Mojo &amp; Career XP are safely checkpointed.
@@ -662,7 +689,7 @@ export const ArenaView: React.FC<ArenaViewProps> = ({
               <div className="min-w-0">
                 <h2 className="text-xl font-display font-bold text-white">Run Complete</h2>
                 <p className="text-[11px] text-[#B8B8B8] font-mono tabular-nums truncate">
-                  {activeReceipt.dTag}
+                  {getRealmSpec(completedSummary.realmId).name} · {activeReceipt.dTag}
                 </p>
               </div>
               <span className="text-xs font-mono tabular-nums text-[#00F0FF] shrink-0">

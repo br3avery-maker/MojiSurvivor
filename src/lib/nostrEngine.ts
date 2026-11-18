@@ -59,6 +59,8 @@ import {
   getMojiSillySuperlative,
   type CardRarity,
 } from './awardsAndCards';
+import { sanitizeBlossomServerList } from './nsitePublisher';
+import { normalizeRealmId, type RealmId } from './realms';
 
 export interface RelayProbeResult {
   url: string;
@@ -111,6 +113,7 @@ export interface VerifiedLeaderboardEntry {
   rawEvent: NostrEvent;
   source: 'relay' | 'local_confirmed';
   playerRunCount?: number;
+  realmId?: RealmId;
   featuredEmoji?: import('./storage').FeaturedEmojiSummary;
 }
 
@@ -1216,7 +1219,16 @@ export class MojiNostrCoordinator {
         relays,
         secret,
         name: 'MojiSurvivor',
-        perms: ['sign_event:30078', 'sign_event:5', 'sign_event:1'],
+        perms: [
+          'sign_event:30078',
+          'sign_event:5',
+          'sign_event:1',
+          'sign_event:24242',
+          'sign_event:15128',
+          'sign_event:35128',
+          'sign_event:34128',
+          'sign_event:10063',
+        ],
       });
 
       const now = Date.now();
@@ -2333,6 +2345,8 @@ export class MojiNostrCoordinator {
       }
     }
 
+    const mapTag = ev.tags.find((t) => t[0] === 'map')?.[1];
+
     return {
       eventId: ev.id,
       dTag,
@@ -2345,6 +2359,7 @@ export class MojiNostrCoordinator {
       durationSec,
       runHash,
       weapons,
+      realmId: mapTag ? normalizeRealmId(mapTag) : undefined,
       createdAt: ev.created_at,
       sigPrefix: ev.sig.slice(0, 12),
       rawEvent: ev,
@@ -2373,6 +2388,11 @@ export class MojiNostrCoordinator {
       ['run_hash', receipt.runHash],
       ['weapons', receipt.weaponsSummary],
     ];
+
+    const existingHasMapTag = receipt.signedEvent?.tags.some((t) => t[0] === 'map');
+    if (receipt.realmId && (!receipt.signedEvent || existingHasMapTag)) {
+      tags.push(['map', receipt.realmId]);
+    }
 
     // If a pre-signed event already exists on this receipt, match its exact tag layout
     const existingHasFeaturedTag = receipt.signedEvent?.tags.some(
@@ -2465,6 +2485,70 @@ export class MojiNostrCoordinator {
         error:
           err instanceof Error ? err.message : 'Signature request rejected or timed out.',
       };
+    }
+  }
+
+  public async signCustomEvent(
+    template: Omit<NostrEvent, 'id' | 'pubkey' | 'sig'>
+  ): Promise<{ ok: true; event: NostrEvent } | { ok: false; error: string }> {
+    return this.signTemplateWithActiveSigner(template);
+  }
+
+  public async broadcastEventToRelays(
+    signedEvent: NostrEvent,
+    relayOverrides?: readonly string[]
+  ): Promise<{
+    accepted: string[];
+    rejected: Record<string, string>;
+  }> {
+    const targetRelays =
+      relayOverrides && relayOverrides.length > 0 ? Array.from(new Set(relayOverrides)) : this.relays;
+    const accepted: string[] = [];
+    const rejected: Record<string, string> = {};
+
+    await Promise.allSettled(
+      targetRelays.map(async (relayUrl) => {
+        try {
+          const relay = this.pool.relay(relayUrl);
+          await relay.event(signedEvent, { signal: AbortSignal.timeout(7500) });
+          accepted.push(relayUrl);
+          this.relayReachability.set(relayUrl, 'ok');
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : 'Relay timeout or rejection';
+          rejected[relayUrl] = reason;
+          this.relayReachability.set(relayUrl, 'error');
+        }
+      })
+    );
+
+    return { accepted, rejected };
+  }
+
+  public async fetchUserBlossomServers(targetPubkey = this.pubkey): Promise<string[]> {
+    if (!targetPubkey || !/^[0-9a-f]{64}$/i.test(targetPubkey)) return [];
+    try {
+      const events = await this.pool.query(
+        [
+          {
+            kinds: [10063],
+            authors: [targetPubkey.toLowerCase()],
+            limit: 5,
+          },
+        ],
+        { signal: AbortSignal.timeout(6500) }
+      );
+      let latest: NostrEvent | null = null;
+      for (const ev of events) {
+        if (!verifyEvent(ev)) continue;
+        if (!latest || ev.created_at > latest.created_at) latest = ev;
+      }
+      if (!latest) return [];
+      const urls = latest.tags
+        .filter((t) => t[0] === 'server' && typeof t[1] === 'string')
+        .map((t) => t[1]);
+      return sanitizeBlossomServerList(urls);
+    } catch {
+      return [];
     }
   }
 
@@ -2729,6 +2813,8 @@ export class MojiNostrCoordinator {
       totalKills: state.totalKills,
       totalBossKills: state.totalBossKills ?? 0,
       totalRuns: state.totalRuns,
+      unlockedRealms: state.unlockedRealms ?? ['obsidian_foundry'],
+      selectedRealmId: state.selectedRealmId ?? 'obsidian_foundry',
       upgrades: state.upgrades,
       codex: codexMap,
       safePackAuthors: state.safePackAuthors.slice(0, 300),

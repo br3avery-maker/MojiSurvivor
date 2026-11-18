@@ -19,6 +19,7 @@ import {
   type PlayerLeaderboardAggregate,
   type VerifiedLeaderboardEntry,
 } from '../lib/nostrEngine';
+import { getRealmSpec } from '../lib/realms';
 import type { PersistedGameState, RunReceiptRecord } from '../lib/storage';
 import { MojiRarityCard } from './PlayerTradingCard';
 import { ScoreCardPanel } from './ScoreCardPanel';
@@ -87,6 +88,7 @@ function remoteEntryToReceiptRecord(entry: VerifiedLeaderboardEntry): RunReceipt
     durationSec: entry.durationSec,
     mojoEarned: 0,
     weaponsSummary: entry.weapons,
+    realmId: entry.realmId,
     featuredEmoji: entry.featuredEmoji,
     createdAt: entry.createdAt,
     status: 'confirmed',
@@ -725,6 +727,16 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                           ·
                         </span>
                         <span className="text-white">W{rec.wave}</span>
+                        {rec.realmId && (
+                          <>
+                            <span aria-hidden="true" className="text-[#5E5E5E]">
+                              ·
+                            </span>
+                            <span className="text-[#00F0FF]">
+                              {getRealmSpec(rec.realmId).shortName}
+                            </span>
+                          </>
+                        )}
                         <span aria-hidden="true" className="text-[#5E5E5E]">
                           ·
                         </span>
@@ -870,6 +882,16 @@ export const LeaderboardView: React.FC<LeaderboardViewProps> = ({
                         ·
                       </span>
                       <span className="text-white">W{remote.wave}</span>
+                      {remote.realmId && (
+                        <>
+                          <span aria-hidden="true" className="text-[#5E5E5E]">
+                            ·
+                          </span>
+                          <span className="text-[#00F0FF]">
+                            {getRealmSpec(remote.realmId).shortName}
+                          </span>
+                        </>
+                      )}
                       <span aria-hidden="true" className="text-[#5E5E5E]">
                         ·
                       </span>

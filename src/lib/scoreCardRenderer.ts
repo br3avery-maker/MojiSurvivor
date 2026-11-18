@@ -4,6 +4,7 @@ import {
   getEmojiContrastBacking,
   MOJI_APP_ICON_URL,
 } from './pixelBackgrounds';
+import { getRealmSpec } from './realms';
 import type { RunReceiptRecord } from './storage';
 
 export interface ScoreCardRenderInput {
@@ -140,9 +141,10 @@ export function buildScoreSummaryText(
         ? 'Signed Local Receipt (unconfirmed on relays)'
         : 'Local Run Summary (unsigned)';
 
+  const realmLabel = receipt.realmId ? ` · ${getRealmSpec(receipt.realmId).name}` : '';
   return [
     `MojiSurvivor Arcade Receipt — ${playerName}`,
-    `Score: ${receipt.score.toLocaleString()} pts · Wave ${receipt.wave}`,
+    `Score: ${receipt.score.toLocaleString()} pts · Wave ${receipt.wave}${realmLabel}`,
     `Defeated: ${receipt.defeated} emojis (${receipt.bossesDefeated} Apex Bosses) · +${receipt.mojoEarned} Mojo`,
     `Time: ${formatDurationClock(receipt.durationSec)} · Top Spell: ${bestSpell}${featured}`,
     `${statusLine} · #mojisurvivor`,
@@ -151,7 +153,7 @@ export function buildScoreSummaryText(
 
 /**
  * Generates an actual downloadable/shareable high-DPI PNG digital arcade receipt
- * (`#000000` black, `#FF1493` deep pink, crisp `#FFFFFF` type, restrained `#00F0FF` & `#FFD700` accents).
+ * (`#000000` black, `#FF1493` deep pink, crisp `#FFFFFF` type, restrained `#00F0FF` & `#E2E8F0` accents).
  */
 export async function renderRunScoreCardPng(
   input: ScoreCardRenderInput
@@ -183,7 +185,8 @@ export async function renderRunScoreCardPng(
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
 
-  const pixelTile = getArenaPixelTileCanvas('dungeon_circuit', receipt.wave);
+  const realmSpec = getRealmSpec(receipt.realmId);
+  const pixelTile = getArenaPixelTileCanvas(realmSpec.defaultFloorStyle, receipt.wave);
   if (pixelTile) {
     ctx.save();
     ctx.imageSmoothingEnabled = false;
@@ -333,7 +336,7 @@ export async function renderRunScoreCardPng(
   ctx.fillStyle = '#FFFFFF';
   ctx.font = '600 14px "JetBrains Mono", monospace';
   ctx.fillText(
-    `WAVE ${receipt.wave} REACHED  ·  TIME ${formatDurationClock(receipt.durationSec)}`,
+    `${realmSpec.shortName.toUpperCase()}  ·  WAVE ${receipt.wave}  ·  TIME ${formatDurationClock(receipt.durationSec)}`,
     width / 2,
     pad + 318
   );

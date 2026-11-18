@@ -2,6 +2,15 @@ import { retroAudio } from './audio';
 import { sha256Hex, type EmojiCombatTrait } from './cryptoStats';
 import { getArenaPixelTileCanvas } from './pixelBackgrounds';
 import {
+  DEFAULT_REALM_ID,
+  getRealmSpec,
+  getRealmUnlockedForBossWave,
+  normalizeRealmId,
+  type RealmId,
+  type RealmObstacle,
+  type RealmSpec,
+} from './realms';
+import {
   triggerHaptic,
   type ActiveRunCheckpoint,
   type FeaturedEmojiSummary,
@@ -46,6 +55,9 @@ export interface ActiveBuffsHud {
 }
 
 export interface ArenaHudSnapshot {
+  realmId: RealmId;
+  realmName: string;
+  overchargeActive: boolean;
   hp: number;
   maxHp: number;
   level: number;
@@ -65,6 +77,7 @@ export interface ArenaHudSnapshot {
 
 export interface CompletedRunSummary {
   runSessionId: string;
+  realmId: RealmId;
   score: number;
   wave: number;
   defeated: number;
@@ -190,6 +203,7 @@ interface EnemyEntity {
   damage: number;
   radius: number;
   isBoss: boolean;
+  bossSpawnWave?: number;
   isElite: boolean;
   phaseAngle: number;
   actionTimer: number;
@@ -280,6 +294,7 @@ export interface GameEngineCallbacks {
   onLevelUpChoices: (choices: LevelUpChoice[]) => void;
   onEnemyDefeated: (trait: EmojiCombatTrait) => void;
   onCheckpointProgress: (payload: RunProgressCheckpointPayload) => void;
+  onRealmUnlocked?: (realmId: RealmId) => void;
   onGameOver: (summary: CompletedRunSummary) => void;
 }
 
@@ -297,6 +312,11 @@ export class MojiSurvivorEngine {
   private careerPlayerLevel = 1;
   private rebirthCount = 0;
   private rebirthMojoMultiplier = 1;
+  private realmId: RealmId = DEFAULT_REALM_ID;
+  private realmSpec: RealmSpec = getRealmSpec(DEFAULT_REALM_ID);
+  private padCooldowns = new Map<string, number>();
+  private overchargeActive = false;
+  private riftHazardTimer = 6.5;
 
   private arenaWidth = 1800;
   private arenaHeight = 1800;
@@ -394,7 +414,8 @@ export class MojiSurvivorEngine {
     callbacks: GameEngineCallbacks,
     initialCheckpoint?: ActiveRunCheckpoint | null,
     careerPlayerLevel = 1,
-    rebirthCount = 0
+    rebirthCount = 0,
+    realmId: RealmId = DEFAULT_REALM_ID
   ) {
     this.canvas = canvas;
     const context = canvas.getContext('2d', { alpha: false });
@@ -408,6 +429,10 @@ export class MojiSurvivorEngine {
     this.careerPlayerLevel = Math.max(1, careerPlayerLevel);
     this.rebirthCount = Math.max(0, Math.floor(rebirthCount));
     this.rebirthMojoMultiplier = 1 + this.rebirthCount * 0.12;
+    this.realmId = normalizeRealmId(initialCheckpoint?.realmId ?? realmId);
+    this.realmSpec = getRealmSpec(this.realmId);
+    this.arenaWidth = this.realmSpec.arenaWidth;
+    this.arenaHeight = this.realmSpec.arenaHeight;
 
     this.initSpriteLayer();
     this.initRunState(initialCheckpoint);
@@ -527,6 +552,10 @@ export class MojiSurvivorEngine {
     this.stationaryTimer = 0;
     this.stationaryAnchor = { x: this.player.x, y: this.player.y };
 
+    this.padCooldowns.clear();
+    this.overchargeActive = false;
+    this.riftHazardTimer = 6.5;
+
     this.enemies = [];
     this.projectiles = [];
     this.enemyBullets = [];
@@ -546,6 +575,62 @@ export class MojiSurvivorEngine {
       const ang = baseOpeningAngle + i * (Math.PI * 0.65) + (Math.random() - 0.5) * 0.25;
       this.spawnRegularEnemy(ang, 370 + Math.random() * 60, false);
     }
+  }
+
+  private isPointInsideObstacle(x: number, y: number, pad = 0, types?: ReadonlyArray<RealmObstacle['kind']>): boolean {
+    for (const obs of this.realmSpec.obstacles) {
+      if (types && !types.includes(obs.kind)) continue;
+      if (
+        x >= obs.x - pad &&
+        x <= obs.x + obs.w + pad &&
+        y >= obs.y - pad &&
+        y <= obs.y + obs.h + pad
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private resolveCircleVsObstacles(
+    x: number,
+    y: number,
+    radius: number,
+    margin = 36
+  ): { x: number; y: number } {
+    let cx = Math.max(margin, Math.min(this.arenaWidth - margin, x));
+    let cy = Math.max(margin, Math.min(this.arenaHeight - margin, y));
+
+    for (const obs of this.realmSpec.obstacles) {
+      const nearestX = Math.max(obs.x, Math.min(cx, obs.x + obs.w));
+      const nearestY = Math.max(obs.y, Math.min(cy, obs.y + obs.h));
+      const dx = cx - nearestX;
+      const dy = cy - nearestY;
+      const distSq = dx * dx + dy * dy;
+
+      if (distSq === 0) {
+        // Center is inside obstacle; push out along shortest escape axis
+        const dLeft = cx - obs.x;
+        const dRight = obs.x + obs.w - cx;
+        const dTop = cy - obs.y;
+        const dBottom = obs.y + obs.h - cy;
+        const minEdge = Math.min(dLeft, dRight, dTop, dBottom);
+        if (minEdge === dLeft) cx = obs.x - radius;
+        else if (minEdge === dRight) cx = obs.x + obs.w + radius;
+        else if (minEdge === dTop) cy = obs.y - radius;
+        else cy = obs.y + obs.h + radius;
+      } else if (distSq < radius * radius) {
+        const dist = Math.sqrt(distSq);
+        const overlap = radius - dist;
+        cx += (dx / dist) * overlap;
+        cy += (dy / dist) * overlap;
+      }
+    }
+
+    return {
+      x: Math.max(margin, Math.min(this.arenaWidth - margin, cx)),
+      y: Math.max(margin, Math.min(this.arenaHeight - margin, cy)),
+    };
   }
 
   private bindInputs(): void {
@@ -693,6 +778,7 @@ export class MojiSurvivorEngine {
     if (!this.running || this.player.hp <= 0) return null;
     return {
       runSessionId: this.runSessionId,
+      realmId: this.realmId,
       savedAt: Date.now(),
       wave: this.wave,
       waveTimer: this.waveTimer,
@@ -859,18 +945,106 @@ export class MojiSurvivorEngine {
     }
     if (this.shakeTimer > 0) this.shakeTimer = Math.max(0, this.shakeTimer - dt);
 
-    // Move player inside arena bounds
+    // Move player inside arena bounds & resolve against realm pylons / corridor walls
     const mv = this.resolveMovementVector();
     const speedBoost = this.player.buffs.speedTimer > 0 ? 1.55 : 1.0;
     const velocity = this.player.baseSpeed * speedBoost;
-    this.player.x = Math.max(
-      36,
-      Math.min(this.arenaWidth - 36, this.player.x + mv.x * velocity * dt)
+    const movedPlayer = this.resolveCircleVsObstacles(
+      this.player.x + mv.x * velocity * dt,
+      this.player.y + mv.y * velocity * dt,
+      this.player.radius,
+      36
     );
-    this.player.y = Math.max(
-      36,
-      Math.min(this.arenaHeight - 36, this.player.y + mv.y * velocity * dt)
-    );
+    this.player.x = movedPlayer.x;
+    this.player.y = movedPlayer.y;
+
+    // Realm Interactive Pads (Magnet Shrines, Linked Warp Runes, Overcharge Nodes)
+    this.overchargeActive = false;
+    for (const [pid, cd] of this.padCooldowns.entries()) {
+      if (cd - dt <= 0) this.padCooldowns.delete(pid);
+      else this.padCooldowns.set(pid, cd - dt);
+    }
+
+    for (const pad of this.realmSpec.pads) {
+      const pDist = Math.hypot(this.player.x - pad.x, this.player.y - pad.y);
+      const activeCd = this.padCooldowns.get(pad.id) ?? 0;
+
+      if (pad.kind === 'overcharge_node') {
+        if (pDist <= pad.radius + this.player.radius * 0.4) {
+          this.overchargeActive = true;
+        }
+      } else if (pad.kind === 'magnet_shrine' && activeCd <= 0 && pDist <= pad.radius + this.player.radius * 0.5) {
+        this.padCooldowns.set(pad.id, pad.cooldownSec);
+        this.player.buffs.globalMagnetTimer = Math.max(this.player.buffs.globalMagnetTimer, 4.5);
+        retroAudio.playPowerup();
+        triggerHaptic(28, this.settings.haptics);
+        this.callbacks.onBannerToast('Magnet Shrine Activated');
+        this.shockwaves.push({
+          x: pad.x,
+          y: pad.y,
+          radius: 18,
+          maxRadius: 210,
+          life: 0.42,
+          maxLife: 0.42,
+          color: '#00F0FF',
+          hitIds: new Set(),
+        });
+      } else if (pad.kind === 'warp_rune' && activeCd <= 0 && pad.linkPadId && pDist <= pad.radius + this.player.radius * 0.35) {
+        const destPad = this.realmSpec.pads.find((p) => p.id === pad.linkPadId);
+        if (destPad) {
+          this.padCooldowns.set(pad.id, pad.cooldownSec);
+          this.padCooldowns.set(destPad.id, destPad.cooldownSec);
+          this.shockwaves.push({
+            x: pad.x,
+            y: pad.y,
+            radius: 16,
+            maxRadius: 96,
+            life: 0.28,
+            maxLife: 0.28,
+            color: '#C084FC',
+            hitIds: new Set(),
+          });
+          this.player.x = destPad.x;
+          this.player.y = destPad.y;
+          this.player.invulnTimer = Math.max(this.player.invulnTimer, 0.6);
+          this.stationaryAnchor = { x: destPad.x, y: destPad.y };
+          this.stationaryTimer = 0;
+          retroAudio.playPowerup();
+          triggerHaptic(32, this.settings.haptics);
+          this.callbacks.onBannerToast('Starlight Warp Shift');
+          this.shockwaves.push({
+            x: destPad.x,
+            y: destPad.y,
+            radius: 16,
+            maxRadius: 110,
+            life: 0.32,
+            maxLife: 0.32,
+            color: '#00F0FF',
+            hitIds: new Set(),
+          });
+        }
+      }
+    }
+
+    // Starlight Rift telegraphed ambient rift hazards
+    if (this.realmSpec.riftHazards) {
+      this.riftHazardTimer -= dt;
+      if (this.riftHazardTimer <= 0 && this.hazards.length < 4) {
+        this.riftHazardTimer = Math.max(5.5, 9.5 - this.wave * 0.22);
+        const rAng = Math.random() * Math.PI * 2;
+        const rDist = 70 + Math.random() * 110;
+        const hx = Math.max(80, Math.min(this.arenaWidth - 80, this.player.x + Math.cos(rAng) * rDist));
+        const hy = Math.max(80, Math.min(this.arenaHeight - 80, this.player.y + Math.sin(rAng) * rDist));
+        this.hazards.push({
+          x: hx,
+          y: hy,
+          radius: 62,
+          fuse: 1.25,
+          maxFuse: 1.25,
+          damage: Math.round(16 + this.wave * 3.5),
+        });
+      }
+    }
 
     // Track stationary camping / AFK position & fire telegraphed Target-Lock Mortar if camping in one spot
     const anchorDist = Math.hypot(
@@ -951,9 +1125,11 @@ export class MojiSurvivorEngine {
       this.spawnPowerUpCrate();
     }
 
-    // Fire auto-weapons (scaled by Career Level haste + Overclock Fury)
+    // Fire auto-weapons (scaled by Career Level haste, Overclock Fury, and Citadel Overcharge Node)
     const fireRateMult =
-      this.player.fireRateHaste * (this.player.buffs.furyTimer > 0 ? 1.3 : 1.0);
+      this.player.fireRateHaste *
+      (this.player.buffs.furyTimer > 0 ? 1.3 : 1.0) *
+      (this.overchargeActive ? 1.25 : 1.0);
     const dmgMult =
       this.player.damageMultiplier * (this.player.buffs.furyTimer > 0 ? 1.45 : 1.0);
 
@@ -989,12 +1165,28 @@ export class MojiSurvivorEngine {
   ): void {
     const pool = this.callbacks.getEmojiPool();
     if (pool.length === 0) return;
-    const trait = pool[Math.floor(Math.random() * pool.length)];
+
+    let trait = pool[Math.floor(Math.random() * pool.length)];
+    if (this.realmSpec.sniperStalkerBias > 0 && Math.random() < this.realmSpec.sniperStalkerBias) {
+      const specialistPool = pool.filter(
+        (t) =>
+          t.behaviorType === 1 ||
+          t.behaviorType === 3 ||
+          t.tier === 'Rare' ||
+          t.tier === 'Apex'
+      );
+      if (specialistPool.length > 0) {
+        trait = specialistPool[Math.floor(Math.random() * specialistPool.length)];
+      }
+    }
 
     const angle = forceAngle ?? Math.random() * Math.PI * 2;
     const dist = forceDist ?? 350 + Math.random() * 110;
-    const x = Math.max(40, Math.min(this.arenaWidth - 40, this.player.x + Math.cos(angle) * dist));
-    const y = Math.max(40, Math.min(this.arenaHeight - 40, this.player.y + Math.sin(angle) * dist));
+    const rawX = Math.max(40, Math.min(this.arenaWidth - 40, this.player.x + Math.cos(angle) * dist));
+    const rawY = Math.max(40, Math.min(this.arenaHeight - 40, this.player.y + Math.sin(angle) * dist));
+    const safePos = this.resolveCircleVsObstacles(rawX, rawY, 24, 40);
+    const x = safePos.x;
+    const y = safePos.y;
 
     const w = Math.max(0, this.wave - 1);
     const lateWave = Math.max(0, this.wave - 5);
@@ -1012,7 +1204,8 @@ export class MojiSurvivorEngine {
 
     const baseSpeed = 56 + trait.speed * 22;
     const waveSpeedScale = 0.86 + Math.min(0.78, w * 0.052 + lateWave * 0.02);
-    const speed = baseSpeed * waveSpeedScale * (isElite ? 1.1 : 1.0);
+    const realmSpeedMult = trait.behaviorType === 0 ? this.realmSpec.swarmerSpeedMult : 1.0;
+    const speed = baseSpeed * waveSpeedScale * realmSpeedMult * (isElite ? 1.1 : 1.0);
 
     const waveDmgScale = 1 + w * 0.15 + Math.pow(w, 1.25) * 0.045 + Math.pow(lateWave, 1.5) * 0.08;
     const damage = Math.max(
@@ -1054,8 +1247,9 @@ export class MojiSurvivorEngine {
     );
 
     const angle = Math.random() * Math.PI * 2;
-    const x = Math.max(80, Math.min(this.arenaWidth - 80, this.player.x + Math.cos(angle) * 320));
-    const y = Math.max(80, Math.min(this.arenaHeight - 80, this.player.y + Math.sin(angle) * 320));
+    const rawX = Math.max(80, Math.min(this.arenaWidth - 80, this.player.x + Math.cos(angle) * 320));
+    const rawY = Math.max(80, Math.min(this.arenaHeight - 80, this.player.y + Math.sin(angle) * 320));
+    const safeBoss = this.resolveCircleVsObstacles(rawX, rawY, 44, 80);
     const w = Math.max(0, this.wave - 1);
     const lateWave = Math.max(0, this.wave - 5);
     const bossHp = Math.round(
@@ -1066,17 +1260,18 @@ export class MojiSurvivorEngine {
     const boss: EnemyEntity = {
       uid: this.nextEntityUid++,
       trait: bossTrait,
-      x,
-      y,
+      x: safeBoss.x,
+      y: safeBoss.y,
       hp: bossHp,
       maxHp: bossHp,
       speed: 112 + Math.min(68, this.wave * 3.2),
       damage: Math.round(20 + this.wave * 3.4 + Math.pow(lateWave, 1.35) * 2.2),
       radius: 40,
       isBoss: true,
+      bossSpawnWave: this.wave,
       isElite: true,
       phaseAngle: 0,
-      actionTimer: 1.65,
+      actionTimer: 1.65 * this.realmSpec.bossCooldownMult,
       hitFlash: 0,
       knockbackCooldown: 999,
     };
@@ -1094,9 +1289,15 @@ export class MojiSurvivorEngine {
     const picked = options[Math.floor(Math.random() * options.length)];
     const angle = Math.random() * Math.PI * 2;
     const dist = 180 + Math.random() * 200;
+    const safeCrate = this.resolveCircleVsObstacles(
+      this.player.x + Math.cos(angle) * dist,
+      this.player.y + Math.sin(angle) * dist,
+      20,
+      60
+    );
     this.crates.push({
-      x: Math.max(60, Math.min(this.arenaWidth - 60, this.player.x + Math.cos(angle) * dist)),
-      y: Math.max(60, Math.min(this.arenaHeight - 60, this.player.y + Math.sin(angle) * dist)),
+      x: safeCrate.x,
+      y: safeCrate.y,
       kind: picked.kind,
       label: picked.label,
       life: 22,
@@ -1260,7 +1461,8 @@ export class MojiSurvivorEngine {
       p.y += p.vy * dt;
       p.life -= dt;
 
-      if (p.life <= 0) {
+      // Stone walls block player projectiles; Starlight 'energy' monoliths let piercing Plasma Lance beams pass
+      if (p.life <= 0 || this.isPointInsideObstacle(p.x, p.y, 4, ['stone'])) {
         this.projectiles.splice(i, 1);
         continue;
       }
@@ -1324,7 +1526,8 @@ export class MojiSurvivorEngine {
         e.y += ny * e.speed * lungeMult * dt;
         e.actionTimer -= dt;
         if (e.actionTimer <= 0) {
-          e.actionTimer = Math.max(1.25, 1.75 - this.wave * 0.015);
+          e.actionTimer =
+            Math.max(1.25, 1.75 - this.wave * 0.015) * this.realmSpec.bossCooldownMult;
           // Radial projectile burst + aimed 3-shot fan + Target-Lock Mortar on player coordinates
           const spokes = 8 + Math.min(8, Math.floor(this.wave / 3));
           for (let s = 0; s < spokes; s++) {
@@ -1441,7 +1644,11 @@ export class MojiSurvivorEngine {
         }
       }
 
-      if (dist <= e.radius + this.player.radius - 2) {
+      const resolvedE = this.resolveCircleVsObstacles(e.x, e.y, e.radius, 24);
+      e.x = resolvedE.x;
+      e.y = resolvedE.y;
+
+      if (Math.hypot(this.player.x - e.x, this.player.y - e.y) <= e.radius + this.player.radius - 2) {
         this.applyPlayerDamage(e.damage);
       }
     }
@@ -1453,7 +1660,7 @@ export class MojiSurvivorEngine {
       b.x += b.vx * dt;
       b.y += b.vy * dt;
       b.life -= dt;
-      if (b.life <= 0) {
+      if (b.life <= 0 || this.isPointInsideObstacle(b.x, b.y, b.radius * 0.5)) {
         this.enemyBullets.splice(i, 1);
         continue;
       }
@@ -1487,7 +1694,10 @@ export class MojiSurvivorEngine {
         if (orb.kind === 'exp') {
           this.grantExp(orb.value);
         } else {
-          const boostedMojo = Math.max(1, Math.round(orb.value * this.rebirthMojoMultiplier));
+          const boostedMojo = Math.max(
+            1,
+            Math.round(orb.value * this.rebirthMojoMultiplier * this.realmSpec.mojoMult)
+          );
           this.mojoEarned += boostedMojo;
           this.score += boostedMojo * 15;
           retroAudio.playPickup();
@@ -1624,7 +1834,7 @@ export class MojiSurvivorEngine {
         vy: -32,
         radius: 0,
         text: String(dmg),
-        color: enemy.isBoss || dmg >= 65 ? '#FFD700' : '#F8FAFC',
+        color: enemy.isBoss || dmg >= 65 ? '#00F0FF' : '#F8FAFC',
         life: 0.42,
         maxLife: 0.42,
       });
@@ -1636,15 +1846,30 @@ export class MojiSurvivorEngine {
       if (this.activeBoss?.uid === enemy.uid) {
         this.activeBoss = null;
         this.bossesDefeated += 1;
-        const bossMojo = Math.round(25 * this.rebirthMojoMultiplier);
+        const bossMojo = Math.round(
+          25 * this.rebirthMojoMultiplier * this.realmSpec.mojoMult * this.realmSpec.bossDropMult
+        );
         this.mojoEarned += bossMojo;
-        this.careerXpEarned += 75;
+        this.careerXpEarned += Math.round(75 * this.realmSpec.xpMult);
         this.score += 1200;
-        this.callbacks.onBannerToast(`Apex Boss Defeated · +${bossMojo} Mojo`);
+
+        const unlockedRealm = getRealmUnlockedForBossWave(enemy.bossSpawnWave ?? this.wave);
+        if (unlockedRealm) {
+          this.callbacks.onRealmUnlocked?.(unlockedRealm);
+          const unlockedSpec = getRealmSpec(unlockedRealm);
+          this.callbacks.onBannerToast(
+            `Apex Boss Defeated · Unlocked ${unlockedSpec.name}! (+${bossMojo} Mojo)`
+          );
+        } else {
+          this.callbacks.onBannerToast(`Apex Boss Defeated · +${bossMojo} Mojo`);
+        }
       }
 
       this.defeated += 1;
-      this.careerXpEarned += Math.max(2, enemy.trait.expValue * 2);
+      this.careerXpEarned += Math.max(
+        2,
+        Math.round(enemy.trait.expValue * 2 * this.realmSpec.xpMult)
+      );
       this.score += Math.round(
         enemy.trait.powerRating * (enemy.isBoss ? 8 : enemy.isElite ? 2.5 : 1)
       );
@@ -1714,7 +1939,7 @@ export class MojiSurvivorEngine {
           y: enemy.y - 7,
           kind: 'mojo',
           value: enemy.isBoss
-            ? 15
+            ? 15 * this.realmSpec.bossDropMult
             : enemy.isElite
               ? enemy.trait.mojoValue + 1
               : enemy.trait.mojoValue,
@@ -1876,6 +2101,7 @@ export class MojiSurvivorEngine {
 
     this.callbacks.onGameOver({
       runSessionId: this.runSessionId,
+      realmId: this.realmId,
       score: this.score,
       wave: this.wave,
       defeated: this.defeated,
@@ -1891,6 +2117,9 @@ export class MojiSurvivorEngine {
 
   private emitHud(): void {
     this.callbacks.onHudUpdate({
+      realmId: this.realmId,
+      realmName: this.realmSpec.shortName,
+      overchargeActive: this.overchargeActive,
       hp: Math.round(this.player.hp),
       maxHp: this.player.maxHp,
       level: this.player.level,
@@ -1947,8 +2176,12 @@ export class MojiSurvivorEngine {
     ctx.save();
     ctx.translate(-camX, -camY);
 
-    // Retro 16-bit BreBre Colors pixel-art arena tilemap + double-pixel perimeter
-    const tileCanvas = getArenaPixelTileCanvas(this.settings.arenaBgStyle, this.wave);
+    // Retro 16-bit BreBre Colors pixel-art arena tilemap + realm floor style + double-pixel perimeter
+    const effectiveBgStyle =
+      this.settings.arenaBgStyle && this.settings.arenaBgStyle !== 'auto'
+        ? this.settings.arenaBgStyle
+        : this.realmSpec.defaultFloorStyle;
+    const tileCanvas = getArenaPixelTileCanvas(effectiveBgStyle, this.wave);
     if (tileCanvas) {
       const tileSize = tileCanvas.width; // 256px
       const startTileX = Math.max(0, Math.floor(camX / tileSize) * tileSize);
@@ -1989,11 +2222,71 @@ export class MojiSurvivorEngine {
       ctx.stroke();
     }
 
-    // BreBre Colors double-pixel arena boundary (#5B0633 outer frame + #FF1493 inner barrier)
+    // Realm Interactive Pads (Magnet Shrines, Warp Runes, Overcharge Nodes)
+    for (const pad of this.realmSpec.pads) {
+      const cd = this.padCooldowns.get(pad.id) ?? 0;
+      const ready = cd <= 0;
+      ctx.save();
+      const padAccent =
+        pad.kind === 'magnet_shrine'
+          ? '#00F0FF'
+          : pad.kind === 'warp_rune'
+            ? '#C084FC'
+            : '#E2E8F0';
+      ctx.fillStyle =
+        pad.kind === 'overcharge_node' && this.overchargeActive
+          ? 'rgba(0, 240, 255, 0.14)'
+          : ready
+            ? 'rgba(17, 16, 24, 0.72)'
+            : 'rgba(17, 16, 24, 0.45)';
+      ctx.strokeStyle = ready ? padAccent : '#5E5E5E';
+      ctx.lineWidth = ready ? 2.5 : 1.5;
+      if (!ready) ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.arc(pad.x, pad.y, pad.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.setLineDash([]);
+      ctx.fillStyle = ready ? padAccent : '#94A3B8';
+      ctx.font = '700 10px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ready ? pad.label : `${Math.ceil(cd)}s`, pad.x, pad.y);
+      ctx.restore();
+    }
+
+    // Realm Obstacles (Stone Anchor Pylons / Labyrinth Walls / Void Energy Monoliths)
+    for (const obs of this.realmSpec.obstacles) {
+      ctx.save();
+      const isEnergy = obs.kind === 'energy';
+      ctx.fillStyle = isEnergy ? 'rgba(30, 16, 53, 0.9)' : '#14141D';
+      ctx.strokeStyle = isEnergy ? '#C084FC' : this.realmSpec.accentHex;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(obs.x, obs.y, obs.w, obs.h, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.strokeStyle = isEnergy ? 'rgba(192, 132, 252, 0.35)' : 'rgba(255, 255, 255, 0.12)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(obs.x + 4, obs.y + 4, Math.max(2, obs.w - 8), Math.max(2, obs.h - 8));
+
+      if (obs.label) {
+        ctx.fillStyle = isEnergy ? '#C084FC' : '#94A3B8';
+        ctx.font = '700 9px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(obs.label, obs.x + obs.w / 2, obs.y + obs.h / 2);
+      }
+      ctx.restore();
+    }
+
+    // BreBre Colors double-pixel arena boundary (#9A0957 outer frame + realm accent inner barrier)
     ctx.strokeStyle = '#9A0957';
     ctx.lineWidth = 5;
     ctx.strokeRect(-2, -2, this.arenaWidth + 4, this.arenaHeight + 4);
-    ctx.strokeStyle = '#FF1493';
+    ctx.strokeStyle = this.realmSpec.accentHex;
     ctx.lineWidth = 2;
     ctx.strokeRect(0, 0, this.arenaWidth, this.arenaHeight);
 
@@ -2024,16 +2317,16 @@ export class MojiSurvivorEngine {
         ctx.closePath();
         ctx.fill();
       } else {
-        // Bright Solar Gold Mojo Coin with minted inner ring & vertical bar
-        ctx.fillStyle = '#FFD700';
-        ctx.strokeStyle = '#FEF08A';
+        // Minted Chrome-Silver Mojo Coin with cyan inner ring & vertical bar
+        ctx.fillStyle = '#E2E8F0';
+        ctx.strokeStyle = '#00F0FF';
         ctx.lineWidth = 1.4;
         ctx.beginPath();
         ctx.arc(orb.x, orb.y, 7, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
 
-        ctx.strokeStyle = '#92400E';
+        ctx.strokeStyle = '#1E293B';
         ctx.lineWidth = 1.3;
         ctx.beginPath();
         ctx.arc(orb.x, orb.y, 4.3, 0, Math.PI * 2);
@@ -2054,7 +2347,7 @@ export class MojiSurvivorEngine {
             ? '#00FF9D'
             : c.kind === 'fury'
               ? '#A855F7'
-              : '#FFD700';
+              : '#E2E8F0';
 
       ctx.strokeStyle = crateColor;
       ctx.globalAlpha = 0.28;
@@ -2258,7 +2551,7 @@ export class MojiSurvivorEngine {
         ctx.arc(e.x, e.y, e.radius + 10, 0, Math.PI * 2);
         ctx.stroke();
       } else if (e.isElite) {
-        ctx.strokeStyle = '#FFD700';
+        ctx.strokeStyle = '#00F0FF';
         ctx.lineWidth = 2.2;
         ctx.beginPath();
         ctx.arc(e.x, e.y, e.radius + 4, 0, Math.PI * 2);
