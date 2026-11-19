@@ -49,7 +49,7 @@ bun run build
 - Copy the existing `.env.example` only if a specific tested integration needs its variables; **never commit API keys, Nostr secrets or bunker connection URIs**.
 - A successful build/test proves only those checks. Verify relevant browser behavior, local save/reopen, and device-specific interactions separately.
 
-**Important CI caveat (source-inspected, not repaired here):** the current `.github/workflows/webpack.yml` invokes `npm install && npx webpack` even though this repository declares Vite and Bun. The current `npm-publish-github-packages.yml` uses `npm ci` without a checked-in `package-lock.json` and attempts a GitHub Packages publication on a GitHub release creation event. Treat these as **unreconciled workflow templates, not trustworthy verification or an approved release process**. They are being reviewed in [AgentOps readiness checklist #30](https://github.com/br3avery-maker/AgentOps/issues/30).
+**CI status:** `.github/workflows/webpack.yml` (historical filename) now defines a Bun/Vite verification job for pull requests and pushes to `main`: frozen Bun install, TypeScript check, regression tests, production build, and a downloadable `dist/` artifact. **Treat results as unverified until the exact-head run passes**; a GitHub CI artifact is not a public deployment. The separate `.github/workflows/npm-publish-github-packages.yml` still attempts GitHub Packages publication on release creation and uses `npm ci` without a checked-in npm lockfile; it is **not** an approved game/nsite release path. Follow [AgentOps readiness checklist #30](https://github.com/br3avery-maker/AgentOps/issues/30) for independent release-safety review.
 
 ## Nostr and publication boundaries
 
