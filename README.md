@@ -64,4 +64,4 @@ The game can browse remote Nostr content and includes optional signing and publi
 
 For an actual coding task, identify the source revision, current issue/requirement, requested outcome, preserved behavior, changed files, commands/results, browser or Android verification if required, and a durable branch/PR or other recoverable checkpoint. Record any tests not run. Existing user corrections and the actual game workflow outrank generic scaffolding.
 
-**Status of this README:** source-grounded onboarding, not a claim that the game was built, device-tested or published during the documentation update.
+**Verification boundary:** this README describes source and checks; inspect the current GitHub Actions run for actual build/test evidence. Compilation and regression tests are not installed-device acceptance, a completed AI Studio cold-import test, or proof of live nsite publication.
