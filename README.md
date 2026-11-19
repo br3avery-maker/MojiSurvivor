@@ -8,7 +8,7 @@ This is the **game's source repository**, not the Pretend Internet launcher or a
 
 1. Read [AGENTS.md](AGENTS.md) for source boundaries, current user requirements, safety rules and verification expectations.
 2. Read [NIP.md](NIP.md) before changing Nostr event formats, signers, moderation, or identity handling.
-3. Inspect the exact requested behavior and relevant current source/tests. Do not redesign gameplay, replace the UI, or infer an approved roadmap from an AI Studio example.
+3. Inspect the exact requested behavior and relevant current source/tests.
 4. Keep **build/test** and **sign/publish/deploy** as separate actions. Documentation or CI success is not publication permission.
 
 ## Project map
