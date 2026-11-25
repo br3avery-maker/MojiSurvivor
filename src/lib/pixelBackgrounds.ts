@@ -24,6 +24,7 @@ export const BREBRE_PALETTE = {
 export type ArenaPixelBgStyle =
   | 'auto'
   | 'dungeon_circuit'
+  | 'labyrinth_grid'
   | 'citadel_plates'
   | 'starlight_grid';
 
@@ -36,23 +37,28 @@ export interface ArenaPixelBgOption {
 export const ARENA_PIXEL_BG_OPTIONS: readonly ArenaPixelBgOption[] = [
   {
     id: 'auto',
-    label: 'Auto Wave Cycle',
-    subtitle: 'Rotates BreBre pixel-art realms as waves advance',
+    label: 'Realm Default (Auto)',
+    subtitle: 'Uses each Arena Realm’s dedicated 16-bit pixel floor art',
   },
   {
     id: 'dungeon_circuit',
-    label: 'Obsidian Circuit Floor',
-    subtitle: '#111111 flagstones · #5B0633 & #9A0957 pixel rune traces',
+    label: 'Obsidian Foundry Floor',
+    subtitle: 'Forged basalt flagstones · glowing magenta ember fissures',
+  },
+  {
+    id: 'labyrinth_grid',
+    label: 'Circuit Labyrinth Deck',
+    subtitle: 'Dark motherboard plating · pulsing cyan bus traces & grates',
+  },
+  {
+    id: 'starlight_grid',
+    label: 'Starlight Rift Void',
+    subtitle: 'Cosmic obsidian plane · astral sigils & 8-bit constellations',
   },
   {
     id: 'citadel_plates',
     label: 'Citadel Armor Deck',
-    subtitle: '#1A1A1A pixel plating · #5E5E5E rivets · #CD0D72 conduits',
-  },
-  {
-    id: 'starlight_grid',
-    label: 'Synth Starlight Grid',
-    subtitle: '#000000 void · #5B0633 pixel grid · #FFB6D9 8-bit stars',
+    subtitle: 'Riveted steel blast plates · reactor vents & hazard trims',
   },
 ];
 
@@ -64,10 +70,11 @@ export function resolveArenaPixelBgStyle(
   wave: number
 ): Exclude<ArenaPixelBgStyle, 'auto'> {
   if (style && style !== 'auto') return style;
-  const cycle = Math.floor(Math.max(0, wave - 1) / 2) % 3;
+  const cycle = Math.floor(Math.max(0, wave - 1) / 2) % 4;
   if (cycle === 0) return 'dungeon_circuit';
-  if (cycle === 1) return 'citadel_plates';
-  return 'starlight_grid';
+  if (cycle === 1) return 'labyrinth_grid';
+  if (cycle === 2) return 'starlight_grid';
+  return 'citadel_plates';
 }
 
 function setPixel(
@@ -84,8 +91,7 @@ function setPixel(
 
 /**
  * Generates and caches a crisp 256×256 seamless 16-bit retro pixel-art tile canvas
- * rendered on a 64×64 pixel grid and scaled 4× with nearest-neighbor (`imageSmoothingEnabled = false`)
- * strictly using the BreBre Colors UI Standards Palette v0.
+ * rendered on a 64×64 pixel grid and scaled 4× with nearest-neighbor (`imageSmoothingEnabled = false`).
  */
 export function getArenaPixelTileCanvas(
   style: ArenaPixelBgStyle | undefined,
@@ -106,160 +112,291 @@ export function getArenaPixelTileCanvas(
   lctx.imageSmoothingEnabled = false;
 
   if (resolved === 'dungeon_circuit') {
-    // Base #000000 Black + #111111 Gray 900 pixel flagstones
-    setPixel(lctx, 0, 0, BREBRE_PALETTE.black, gridSize, gridSize);
+    // Obsidian Foundry: forged volcanic basalt flagstones + recessed ember-magenta forge channels
+    setPixel(lctx, 0, 0, '#07060A', gridSize, gridSize);
 
-    // 32x32 staggered pixel stone blocks
-    const blocks = [
+    const stones = [
+      { x: 1, y: 1, w: 30, h: 30, base: '#14121B', hi: '#221E2D', lo: '#0C0A10' },
+      { x: 33, y: 1, w: 30, h: 30, base: '#121018', hi: '#1F1B29', lo: '#0A090F' },
+      { x: 1, y: 33, w: 30, h: 30, base: '#121018', hi: '#1F1B29', lo: '#0A090F' },
+      { x: 33, y: 33, w: 30, h: 30, base: '#15131C', hi: '#242030', lo: '#0D0B12' },
+    ];
+
+    for (let bIdx = 0; bIdx < stones.length; bIdx++) {
+      const b = stones[bIdx];
+      setPixel(lctx, b.x, b.y, b.base, b.w, b.h);
+      // 2px chiseled bevel top/left + recessed bottom/right edge
+      setPixel(lctx, b.x, b.y, b.hi, b.w - 1, 1);
+      setPixel(lctx, b.x, b.y, b.hi, 1, b.h - 1);
+      setPixel(lctx, b.x + 1, b.y + b.h - 1, b.lo, b.w - 1, 1);
+      setPixel(lctx, b.x + b.w - 1, b.y + 1, b.lo, 1, b.h - 1);
+
+      // Stone surface micro-texture & weathering grain
+      for (let dx = 3; dx < b.w - 3; dx += 3) {
+        for (let dy = 3; dy < b.h - 3; dy += 3) {
+          const hash = (dx * 7 + dy * 13 + bIdx * 11) % 19;
+          if (hash === 0 || hash === 5) {
+            setPixel(lctx, b.x + dx, b.y + dy, b.hi, 1, 1);
+          } else if (hash === 9) {
+            setPixel(lctx, b.x + dx, b.y + dy, b.lo, 2, 1);
+          }
+        }
+      }
+
+      // Forged iron corner anchor bolts
+      const corners = [
+        [b.x + 2, b.y + 2],
+        [b.x + b.w - 4, b.y + 2],
+        [b.x + 2, b.y + b.h - 4],
+        [b.x + b.w - 4, b.y + b.h - 4],
+      ];
+      for (const [cx, cy] of corners) {
+        setPixel(lctx, cx, cy, '#332C3F', 2, 2);
+        setPixel(lctx, cx, cy, '#645B73', 1, 1);
+      }
+    }
+
+    // Cracked magma-rune fissure in top-right flagstone
+    const crackPixels = [
+      [40, 8], [41, 9], [42, 9], [43, 10], [44, 11], [44, 12], [45, 13],
+      [46, 13], [47, 14], [48, 15], [49, 15], [42, 10], [41, 11],
+    ];
+    for (const [cx, cy] of crackPixels) {
+      setPixel(lctx, cx, cy, '#08060B', 2, 2);
+      setPixel(lctx, cx, cy, BREBRE_PALETTE.pinkDark3, 1, 1);
+    }
+    setPixel(lctx, 44, 11, BREBRE_PALETTE.pinkDark2, 1, 1);
+    setPixel(lctx, 45, 13, BREBRE_PALETTE.deepPink, 1, 1);
+
+    // Recessed foundry grate vent in bottom-left stone
+    setPixel(lctx, 9, 41, '#08060B', 14, 14);
+    setPixel(lctx, 10, 42, '#2B081B', 12, 12);
+    for (let gy = 43; gy <= 51; gy += 3) {
+      setPixel(lctx, 10, gy, '#1E1A26', 12, 2);
+      setPixel(lctx, 10, gy, '#352E42', 12, 1);
+    }
+    setPixel(lctx, 14, 45, BREBRE_PALETTE.pinkDark2, 4, 1);
+    setPixel(lctx, 15, 48, BREBRE_PALETTE.deepPink, 2, 1);
+
+    // Glowing magma-circuit mortar channels at seams
+    setPixel(lctx, 0, 32, BREBRE_PALETTE.pinkDark3, gridSize, 1);
+    setPixel(lctx, 32, 0, BREBRE_PALETTE.pinkDark3, 1, gridSize);
+    for (let i = 4; i < gridSize; i += 8) {
+      setPixel(lctx, i, 32, BREBRE_PALETTE.pinkDark2, 3, 1);
+      setPixel(lctx, 32, i, BREBRE_PALETTE.pinkDark2, 1, 3);
+    }
+
+    // Carved foundry anvil rune in top-left & bottom-right stones
+    setPixel(lctx, 13, 13, '#0B0910', 6, 6);
+    setPixel(lctx, 14, 14, BREBRE_PALETTE.pinkDark3, 4, 4);
+    setPixel(lctx, 15, 15, BREBRE_PALETTE.pinkDark1, 2, 2);
+    setPixel(lctx, 15, 15, BREBRE_PALETTE.lightPink, 1, 1);
+
+    setPixel(lctx, 45, 45, '#0B0910', 6, 6);
+    setPixel(lctx, 46, 46, BREBRE_PALETTE.pinkDark3, 4, 4);
+    setPixel(lctx, 47, 47, BREBRE_PALETTE.deepPink, 2, 2);
+
+    // Mortar junction foundry node at (32, 32)
+    setPixel(lctx, 30, 30, '#09070D', 5, 5);
+    setPixel(lctx, 31, 31, BREBRE_PALETTE.pinkDark2, 3, 3);
+    setPixel(lctx, 32, 32, BREBRE_PALETTE.lightPink, 1, 1);
+  } else if (resolved === 'labyrinth_grid') {
+    // Circuit Labyrinth: dark cyber-slate PCB floor tiles with glowing #00F0FF cyan circuit buses & vents
+    setPixel(lctx, 0, 0, '#070B10', gridSize, gridSize);
+
+    // 4 beveled machined slate panels
+    const panels = [
       { x: 1, y: 1, w: 30, h: 30 },
       { x: 33, y: 1, w: 30, h: 30 },
       { x: 1, y: 33, w: 30, h: 30 },
       { x: 33, y: 33, w: 30, h: 30 },
     ];
+    for (let idx = 0; idx < panels.length; idx++) {
+      const p = panels[idx];
+      setPixel(lctx, p.x, p.y, idx % 2 === 0 ? '#0E1520' : '#0C121C', p.w, p.h);
+      setPixel(lctx, p.x, p.y, '#1B283A', p.w - 1, 1);
+      setPixel(lctx, p.x, p.y, '#1B283A', 1, p.h - 1);
+      setPixel(lctx, p.x + 1, p.y + p.h - 1, '#060A10', p.w - 1, 1);
+      setPixel(lctx, p.x + p.w - 1, p.y + 1, '#060A10', 1, p.h - 1);
 
-    for (let bIdx = 0; bIdx < blocks.length; bIdx++) {
-      const b = blocks[bIdx];
-      // Block fill in Gray 900 (#111111)
-      setPixel(lctx, b.x, b.y, BREBRE_PALETTE.gray900, b.w, b.h);
+      // Subtle machined grid ticks
+      for (let gx = 6; gx < p.w - 4; gx += 6) {
+        setPixel(lctx, p.x + gx, p.y + 4, '#162232', 1, 1);
+        setPixel(lctx, p.x + gx, p.y + p.h - 5, '#162232', 1, 1);
+      }
+    }
 
-      // Top/Left pixel bevel highlight in Gray 850 (#1A1A1A)
-      setPixel(lctx, b.x, b.y, BREBRE_PALETTE.gray850, b.w, 1);
-      setPixel(lctx, b.x, b.y, BREBRE_PALETTE.gray850, 1, b.h);
+    // Recessed cyan circuit bus channels across mortar lines
+    setPixel(lctx, 0, 32, '#0A2E3B', gridSize, 1);
+    setPixel(lctx, 32, 0, '#0A2E3B', 1, gridSize);
+    for (let t = 6; t < gridSize; t += 12) {
+      setPixel(lctx, t, 32, '#0E5B6E', 4, 1);
+      setPixel(lctx, 32, t, '#0E5B6E', 1, 4);
+    }
 
-      // Subtle checkerboard pixel dithering in corners
-      for (let dx = 2; dx < b.w - 2; dx += 4) {
-        for (let dy = 2; dy < b.h - 2; dy += 4) {
-          if ((dx + dy + bIdx) % 8 === 0) {
-            setPixel(lctx, b.x + dx, b.y + dy, BREBRE_PALETTE.gray850, 1, 1);
+    // Stepped 45-degree PCB traces inside top-left & bottom-right panels
+    setPixel(lctx, 6, 15, '#0C3E4F', 10, 2);
+    setPixel(lctx, 16, 15, '#0C3E4F', 2, 10);
+    setPixel(lctx, 16, 23, '#0C3E4F', 10, 2);
+    setPixel(lctx, 7, 16, '#00B8D4', 8, 1);
+    setPixel(lctx, 17, 16, '#00B8D4', 1, 7);
+
+    // Solder via pads (glowing cyan cores)
+    const vias = [
+      [6, 15],
+      [25, 23],
+      [48, 12],
+      [48, 22],
+      [14, 48],
+      [22, 48],
+    ];
+    for (const [vx, vy] of vias) {
+      setPixel(lctx, vx - 1, vy - 1, '#082633', 3, 3);
+      setPixel(lctx, vx, vy, '#00F0FF', 1, 1);
+    }
+
+    // Vertical circuit trace in top-right panel
+    setPixel(lctx, 48, 12, '#0E5B6E', 1, 10);
+    setPixel(lctx, 48, 16, '#00F0FF', 1, 2);
+
+    // Horizontal circuit trace in bottom-left panel
+    setPixel(lctx, 14, 48, '#0E5B6E', 8, 1);
+    setPixel(lctx, 17, 48, '#00F0FF', 2, 1);
+
+    // Floor cooling louver grating in bottom-right panel
+    setPixel(lctx, 41, 41, '#060A10', 14, 14);
+    for (let ly = 42; ly <= 52; ly += 3) {
+      setPixel(lctx, 42, ly, '#172334', 12, 2);
+      setPixel(lctx, 42, ly, '#253750', 12, 1);
+    }
+    setPixel(lctx, 46, 47, '#00F0FF', 4, 1);
+
+    // Central bus junction relay node
+    setPixel(lctx, 30, 30, '#071A24', 5, 5);
+    setPixel(lctx, 31, 31, '#0097B2', 3, 3);
+    setPixel(lctx, 32, 32, '#B2F5FF', 1, 1);
+  } else if (resolved === 'citadel_plates') {
+    // Citadel Core: Heavy reinforced chrome-slate battleship armor plating + reactor coolant channels
+    setPixel(lctx, 0, 0, '#0C0D12', gridSize, gridSize);
+
+    // Deep armor seams
+    setPixel(lctx, 0, 0, '#050508', gridSize, 1);
+    setPixel(lctx, 0, 0, '#050508', 1, gridSize);
+    setPixel(lctx, 0, 32, '#050508', gridSize, 1);
+    setPixel(lctx, 32, 0, '#050508', 1, gridSize);
+
+    // Raised beveled steel deck plates (NW & SE quadrants)
+    const raised = [
+      { x: 2, y: 2, w: 28, h: 28 },
+      { x: 34, y: 34, w: 28, h: 28 },
+    ];
+    for (const r of raised) {
+      setPixel(lctx, r.x, r.y, '#191C26', r.w, r.h);
+      setPixel(lctx, r.x, r.y, '#2F3546', r.w - 1, 1);
+      setPixel(lctx, r.x, r.y, '#2F3546', 1, r.h - 1);
+      setPixel(lctx, r.x + 1, r.y + r.h - 1, '#0D0F16', r.w - 1, 1);
+      setPixel(lctx, r.x + r.w - 1, r.y + 1, '#0D0F16', 1, r.h - 1);
+      // Inner recessed armor seam
+      setPixel(lctx, r.x + 6, r.y + 6, '#131620', r.w - 12, r.h - 12);
+      setPixel(lctx, r.x + 6, r.y + 6, '#262B3A', r.w - 12, 1);
+      // Subtle steel diamond-tread pixels
+      for (let tx = 9; tx < r.w - 9; tx += 4) {
+        for (let ty = 9; ty < r.h - 9; ty += 4) {
+          setPixel(lctx, r.x + tx, r.y + ty, '#232838', 2, 1);
+        }
+      }
+    }
+
+    // Recessed mechanical bay plates (NE & SW quadrants)
+    setPixel(lctx, 34, 2, '#10121A', 28, 28);
+    setPixel(lctx, 36, 4, '#151822', 24, 24);
+    setPixel(lctx, 2, 34, '#10121A', 28, 28);
+    setPixel(lctx, 4, 36, '#151822', 24, 24);
+
+    // Chrome rivets with specular shine
+    const rivetCoords = [
+      [4, 4], [26, 4], [4, 26], [26, 26],
+      [36, 36], [58, 36], [36, 58], [58, 58],
+    ];
+    for (const [rx, ry] of rivetCoords) {
+      setPixel(lctx, rx, ry, '#475569', 2, 2);
+      setPixel(lctx, rx, ry, '#E2E8F0', 1, 1);
+    }
+
+    // Warning stripe micro-accents on bay edges
+    for (let sx = 38; sx < 58; sx += 4) {
+      setPixel(lctx, sx, 26, '#334155', 2, 2);
+      setPixel(lctx, 26, sx - 2, '#334155', 2, 2);
+    }
+
+    // Recessed high-energy power conduits in mechanical bays
+    setPixel(lctx, 41, 12, '#07080D', 14, 8);
+    setPixel(lctx, 42, 13, BREBRE_PALETTE.pinkDark3, 12, 6);
+    setPixel(lctx, 44, 15, BREBRE_PALETTE.pinkDark1, 8, 2);
+    setPixel(lctx, 47, 15, BREBRE_PALETTE.lightPink, 2, 2);
+
+    setPixel(lctx, 12, 41, '#07080D', 8, 14);
+    setPixel(lctx, 13, 42, '#0A2E3B', 6, 12);
+    setPixel(lctx, 15, 44, '#00B8D4', 2, 8);
+    setPixel(lctx, 15, 47, '#E0F7FA', 2, 2);
+  } else {
+    // starlight_grid: Deep cosmic obsidian plane with dithered amethyst nebula, astral rune grid & twinkling stars
+    setPixel(lctx, 0, 0, '#05040A', gridSize, gridSize);
+
+    // Layered dithered cosmic dust clouds
+    const nebulaClusters = [
+      { cx: 14, cy: 15, col: '#110B1F' },
+      { cx: 48, cy: 46, col: '#120C22' },
+      { cx: 46, cy: 16, col: '#0E091A' },
+    ];
+    for (const n of nebulaClusters) {
+      for (let dx = -7; dx <= 7; dx++) {
+        for (let dy = -7; dy <= 7; dy++) {
+          const d2 = dx * dx + dy * dy;
+          if (d2 <= 36 && (Math.abs(dx + dy) % 2 === 0 || d2 <= 12)) {
+            setPixel(lctx, (n.cx + dx + 64) % 64, (n.cy + dy + 64) % 64, n.col, 1, 1);
           }
         }
       }
-
-      // Corner pixel rivets (#5E5E5E Gray 600)
-      setPixel(lctx, b.x + 2, b.y + 2, BREBRE_PALETTE.gray600, 1, 1);
-      setPixel(lctx, b.x + b.w - 3, b.y + 2, BREBRE_PALETTE.gray600, 1, 1);
-      setPixel(lctx, b.x + 2, b.y + b.h - 3, BREBRE_PALETTE.gray600, 1, 1);
-      setPixel(lctx, b.x + b.w - 3, b.y + b.h - 3, BREBRE_PALETTE.gray600, 1, 1);
     }
+    setPixel(lctx, 14, 15, '#2A144D', 2, 2);
+    setPixel(lctx, 48, 46, '#2E1552', 2, 2);
 
-    // Recessed pixel rune circuit seams along mortar channels (#5B0633 Pink Dark 3 & #9A0957 Pink Dark 2)
-    setPixel(lctx, 0, 32, BREBRE_PALETTE.pinkDark3, gridSize, 1);
-    setPixel(lctx, 32, 0, BREBRE_PALETTE.pinkDark3, 1, gridSize);
-
-    // Stepped pixel circuit traces inside blocks
-    for (let t = 8; t <= 24; t += 2) {
-      setPixel(lctx, t, 16, BREBRE_PALETTE.pinkDark3, 1, 1);
-      setPixel(lctx, 48, t + 32, BREBRE_PALETTE.pinkDark3, 1, 1);
-    }
-    setPixel(lctx, 15, 15, BREBRE_PALETTE.pinkDark2, 3, 3);
-    setPixel(lctx, 16, 16, BREBRE_PALETTE.deepPink, 1, 1);
-
-    setPixel(lctx, 47, 47, BREBRE_PALETTE.pinkDark2, 3, 3);
-    setPixel(lctx, 48, 48, BREBRE_PALETTE.lightPink, 1, 1);
-
-    // Intersection pixel node at (32, 32)
-    setPixel(lctx, 31, 31, BREBRE_PALETTE.pinkDark2, 3, 3);
-    setPixel(lctx, 32, 32, BREBRE_PALETTE.pinkDark1, 1, 1);
-  } else if (resolved === 'citadel_plates') {
-    // Base #111111 Gray 900 with #1A1A1A Gray 850 octagonal armor deck plates
-    setPixel(lctx, 0, 0, BREBRE_PALETTE.gray900, gridSize, gridSize);
-
-    // Diagonal seam channels in #000000 Black
-    setPixel(lctx, 0, 0, BREBRE_PALETTE.black, gridSize, 1);
-    setPixel(lctx, 0, 0, BREBRE_PALETTE.black, 1, gridSize);
-    setPixel(lctx, 0, 32, BREBRE_PALETTE.black, gridSize, 1);
-    setPixel(lctx, 32, 0, BREBRE_PALETTE.black, 1, gridSize);
-
-    // Raised metallic plating (#1A1A1A)
-    setPixel(lctx, 3, 3, BREBRE_PALETTE.gray850, 26, 26);
-    setPixel(lctx, 35, 35, BREBRE_PALETTE.gray850, 26, 26);
-    setPixel(lctx, 35, 3, BREBRE_PALETTE.black, 26, 26);
-    setPixel(lctx, 37, 5, BREBRE_PALETTE.gray900, 22, 22);
-    setPixel(lctx, 3, 35, BREBRE_PALETTE.black, 26, 26);
-    setPixel(lctx, 5, 37, BREBRE_PALETTE.gray900, 22, 22);
-
-    // Pixel rivets in #5E5E5E Gray 600 and #C0C0C0 Silver
-    const rivetCoords = [
-      [5, 5],
-      [26, 5],
-      [5, 26],
-      [26, 26],
-      [37, 37],
-      [58, 37],
-      [37, 58],
-      [58, 58],
-    ];
-    for (const [rx, ry] of rivetCoords) {
-      setPixel(lctx, rx, ry, BREBRE_PALETTE.gray600, 2, 2);
-      setPixel(lctx, rx, ry, BREBRE_PALETTE.silver, 1, 1);
-    }
-
-    // Pink Dark 3 (#5B0633) & Pink Dark 2 (#9A0957) power conduits in recessed quadrants
-    setPixel(lctx, 42, 14, BREBRE_PALETTE.pinkDark3, 12, 4);
-    setPixel(lctx, 44, 15, BREBRE_PALETTE.pinkDark2, 8, 2);
-    setPixel(lctx, 47, 15, BREBRE_PALETTE.pinkDark1, 2, 2);
-
-    setPixel(lctx, 14, 42, BREBRE_PALETTE.pinkDark3, 4, 12);
-    setPixel(lctx, 15, 44, BREBRE_PALETTE.pinkDark2, 2, 8);
-    setPixel(lctx, 15, 47, BREBRE_PALETTE.deepPink, 2, 2);
-  } else {
-    // starlight_grid: Retro 8-bit synth void (#000000) + #5B0633 pixel grid + BreBre pixel stars
-    setPixel(lctx, 0, 0, BREBRE_PALETTE.black, gridSize, gridSize);
-
-    // Dithered pixel nebula cluster in #111111 & #5B0633
-    const nebulaDots = [
-      [10, 12],
-      [12, 14],
-      [14, 12],
-      [11, 15],
-      [44, 42],
-      [46, 44],
-      [42, 45],
-      [45, 40],
-    ];
-    for (const [nx, ny] of nebulaDots) {
-      setPixel(lctx, nx, ny, BREBRE_PALETTE.gray900, 2, 2);
-    }
-    setPixel(lctx, 12, 13, BREBRE_PALETTE.pinkDark3, 1, 1);
-    setPixel(lctx, 44, 43, BREBRE_PALETTE.pinkDark3, 1, 1);
-
-    // Dotted pixel synth grid every 32px
+    // Astral dotted ley-line grid every 32px
     for (let i = 0; i < gridSize; i += 2) {
-      setPixel(
-        lctx,
-        i,
-        0,
-        i % 8 === 0 ? BREBRE_PALETTE.pinkDark2 : BREBRE_PALETTE.pinkDark3,
-        1,
-        1
-      );
-      setPixel(
-        lctx,
-        0,
-        i,
-        i % 8 === 0 ? BREBRE_PALETTE.pinkDark2 : BREBRE_PALETTE.pinkDark3,
-        1,
-        1
-      );
-      setPixel(lctx, i, 32, BREBRE_PALETTE.gray850, 1, 1);
-      setPixel(lctx, 32, i, BREBRE_PALETTE.gray850, 1, 1);
+      const majorCol = i % 8 === 0 ? '#581C87' : '#2E1065';
+      setPixel(lctx, i, 0, majorCol, 1, 1);
+      setPixel(lctx, 0, i, majorCol, 1, 1);
+      if (i % 4 === 0) {
+        setPixel(lctx, i, 32, '#1E1336', 1, 1);
+        setPixel(lctx, 32, i, '#1E1336', 1, 1);
+      }
     }
 
-    // Crisp 8-bit pixel stars (#FFB6D9 Light Pink, #FF1493 Deep Pink, #C0C0C0 Silver, #FFFFFF White)
-    // Plus-shaped pixel star at (20, 22)
-    setPixel(lctx, 20, 21, BREBRE_PALETTE.pinkDark2, 1, 3);
-    setPixel(lctx, 19, 22, BREBRE_PALETTE.pinkDark2, 3, 1);
-    setPixel(lctx, 20, 22, BREBRE_PALETTE.lightPink, 1, 1);
+    // Subtle arcane diamond intersection sigil at (32, 32)
+    setPixel(lctx, 32, 29, '#4C1D95', 1, 7);
+    setPixel(lctx, 29, 32, '#4C1D95', 7, 1);
+    setPixel(lctx, 31, 31, '#7E22CE', 3, 3);
+    setPixel(lctx, 32, 32, '#E9D5FF', 1, 1);
 
-    // Plus-shaped pixel star at (52, 18)
-    setPixel(lctx, 52, 17, BREBRE_PALETTE.gray600, 1, 3);
-    setPixel(lctx, 51, 18, BREBRE_PALETTE.gray600, 3, 1);
-    setPixel(lctx, 52, 18, BREBRE_PALETTE.white, 1, 1);
+    // Crisp 8-bit 4-point pixel stars
+    setPixel(lctx, 20, 20, '#7E22CE', 1, 5);
+    setPixel(lctx, 18, 22, '#7E22CE', 5, 1);
+    setPixel(lctx, 20, 21, '#C084FC', 1, 3);
+    setPixel(lctx, 19, 22, '#C084FC', 3, 1);
+    setPixel(lctx, 20, 22, '#FFFFFF', 1, 1);
 
-    // Single-pixel stars
-    setPixel(lctx, 8, 48, BREBRE_PALETTE.silver, 1, 1);
-    setPixel(lctx, 27, 54, BREBRE_PALETTE.deepPink, 1, 1);
-    setPixel(lctx, 56, 52, BREBRE_PALETTE.lightPink, 1, 1);
+    setPixel(lctx, 52, 17, '#0E7490', 1, 3);
+    setPixel(lctx, 51, 18, '#0E7490', 3, 1);
+    setPixel(lctx, 52, 18, '#E0F7FA', 1, 1);
+
+    // Scattered starfield pixels
+    setPixel(lctx, 8, 48, '#CBD5E1', 1, 1);
+    setPixel(lctx, 27, 54, '#FF1493', 1, 1);
+    setPixel(lctx, 56, 52, '#E9D5FF', 1, 1);
+    setPixel(lctx, 39, 9, '#C084FC', 1, 1);
+    setPixel(lctx, 11, 37, '#94A3B8', 1, 1);
+    setPixel(lctx, 58, 29, '#00F0FF', 1, 1);
   }
 
   const hiRes = document.createElement('canvas');
@@ -415,13 +552,6 @@ const contrastAnalysisCache = new Map<string, EmojiContrastBackingStyle>();
 /**
  * Inspects an emoji/avatar image (when CORS allows pixel readback) to detect dark or
  * low-contrast transparent assets, and returns a 100% opaque BreBre Colors backing plate.
- *
- * - Dark/low-luminance sprites receive a high-contrast Silver (`#C0C0C0`) & Light Pink (`#FFB6D9`)
- *   opaque inner cushion so black line-art and dark silhouettes stand out crisply.
- * - Bright sprites receive a deep `#1A1A1A` / `#5B0633` opaque plate with a `#9A0957` rim.
- * - Cross-origin images that block `getImageData` receive a balanced dual-tone opaque plate
- *   (`#2A1521` outer ring + `#D8C8D2` inner contrast cushion) that guarantees contrast for both
- *   black/dark transparent PNGs and white/light emojis.
  */
 export function getEmojiContrastBacking(
   img: HTMLImageElement | undefined,
@@ -430,10 +560,9 @@ export function getEmojiContrastBacking(
   const cached = contrastAnalysisCache.get(url);
   if (cached) return cached;
 
-  // Default universal high-contrast dual-tone backing (contrasts against both #000000 and #FFFFFF sprites)
   const universalFallback: EmojiContrastBackingStyle = {
     outerFill: BREBRE_PALETTE.gray850,
-    innerCushionFill: '#D4B8C8', // Balanced Silver-Pink mid-light cushion (contrasts with black AND white)
+    innerCushionFill: '#D4B8C8',
     rimStroke: BREBRE_PALETTE.pinkDark2,
     isDarkAsset: true,
   };
@@ -458,11 +587,10 @@ export function getEmojiContrastBacking(
 
     for (let i = 0; i < data.length; i += 4) {
       const a = data[i + 3];
-      if (a < 38) continue; // Ignore transparent background pixels
+      if (a < 38) continue;
       const r = data[i];
       const g = data[i + 1];
       const b = data[i + 2];
-      // Relative perceived luminance (0..255)
       const lum = 0.299 * r + 0.587 * g + 0.114 * b;
       totalLum += lum;
       visiblePixels += 1;
@@ -474,7 +602,6 @@ export function getEmojiContrastBacking(
     }
 
     const avgLum = totalLum / visiblePixels;
-    // If average visible pixel luminance is dark (< 115), use a bright Silver/LightPink opaque cushion
     if (avgLum < 115) {
       const darkStyle: EmojiContrastBackingStyle = {
         outerFill: BREBRE_PALETTE.pinkDark3,
@@ -486,7 +613,6 @@ export function getEmojiContrastBacking(
       return darkStyle;
     }
 
-    // For bright sprites, use an opaque #1A1A1A / #5B0633 dark plum-slate plate so it still separates from the floor
     const brightStyle: EmojiContrastBackingStyle = {
       outerFill: BREBRE_PALETTE.gray900,
       innerCushionFill: '#24111B',
@@ -496,7 +622,6 @@ export function getEmojiContrastBacking(
     contrastAnalysisCache.set(url, brightStyle);
     return brightStyle;
   } catch {
-    // Tainted cross-origin canvas: cache universal mid-light Silver-Pink opaque cushion so dark emojis never vanish
     contrastAnalysisCache.set(url, universalFallback);
     return universalFallback;
   }

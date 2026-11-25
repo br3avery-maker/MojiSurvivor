@@ -13,6 +13,7 @@ import {
   type CareerRebirthResult,
   type UpgradePurchaseResult,
 } from './components/UpgradeLabView';
+import { getRealmPreviewDataUrl } from './lib/arenaSprites';
 import { sha256Hex, type EmojiCombatTrait } from './lib/cryptoStats';
 import type {
   CompletedRunSummary,
@@ -1426,6 +1427,13 @@ export default function App() {
   const isSignedIn = coordinator.isSignedIn();
   const defaultAvatarUrl = MOJI_APP_ICON_URL;
   const lobbyPixelBannerUrl = useMemo(() => getLobbyPixelBannerDataUrl(), []);
+  const realmPreviewUrls = useMemo(
+    () =>
+      Object.fromEntries(
+        REALM_CATALOG.map((r) => [r.id, getRealmPreviewDataUrl(r.id)])
+      ) as Record<RealmId, string>,
+    []
+  );
 
   if (destination === 'arena') {
     return (
@@ -1711,12 +1719,13 @@ export default function App() {
                   Defeat Wave 5 · 10 · 15 Apex Bosses to unlock permanently
                 </span>
               </div>
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
                 {REALM_CATALOG.map((realm) => {
                   const unlockedList = mergeUnlockedRealms(persisted.unlockedRealms);
                   const isUnlocked = unlockedList.includes(realm.id);
                   const activeRealmId = persisted.selectedRealmId ?? DEFAULT_REALM_ID;
                   const isSelected = activeRealmId === realm.id;
+                  const previewUrl = realmPreviewUrls[realm.id];
                   return (
                     <button
                       key={realm.id}
@@ -1729,33 +1738,47 @@ export default function App() {
                           ? { borderColor: realm.accentHex }
                           : undefined
                       }
-                      className={`min-h-[60px] text-left p-2.5 rounded-lg border transition-colors ${
+                      className={`overflow-hidden text-left rounded-lg border transition-colors ${
                         !isUnlocked
-                          ? 'bg-[#07070B] border-white/10 text-[#64748B] cursor-not-allowed opacity-75'
+                          ? 'bg-[#07070B] border-white/10 text-[#64748B] cursor-not-allowed'
                           : isSelected
                             ? 'bg-[#0B0A12] text-white'
                             : 'bg-[#0B0A12] border-white/10 text-[#CBD5E1] hover:border-white/30'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-1.5">
-                        <span className="text-xs font-semibold truncate">
-                          {realm.name}
-                        </span>
-                        {!isUnlocked ? (
-                          <Lock className="w-3.5 h-3.5 text-[#94A3B8] shrink-0" />
-                        ) : (
-                          isSelected && (
+                      <div className="relative h-14 w-full bg-[#07070B] overflow-hidden border-b border-white/10">
+                        {previewUrl && (
+                          <img
+                            src={previewUrl}
+                            alt={`${realm.name} 16-bit pixel arena preview`}
+                            className={`w-full h-full object-cover pixelated ${
+                              !isUnlocked ? 'opacity-35 grayscale' : 'opacity-95'
+                            }`}
+                          />
+                        )}
+                        {!isUnlocked && (
+                          <div className="absolute inset-0 bg-black/45 flex items-center justify-center">
+                            <Lock className="w-4 h-4 text-[#CBD5E1]" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="p-2.5">
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="text-xs font-semibold truncate">
+                            {realm.name}
+                          </span>
+                          {isUnlocked && isSelected && (
                             <span
                               className="text-[10px] font-mono font-semibold shrink-0"
                               style={{ color: realm.accentHex }}
                             >
                               ACTIVE
                             </span>
-                          )
-                        )}
-                      </div>
-                      <div className="text-[11px] font-mono tabular-nums text-[#94A3B8] mt-1 truncate">
-                        {isUnlocked ? realm.tagline : realm.unlockRequirementLabel}
+                          )}
+                        </div>
+                        <div className="text-[11px] font-mono tabular-nums text-[#94A3B8] mt-0.5 truncate">
+                          {isUnlocked ? realm.tagline : realm.unlockRequirementLabel}
+                        </div>
                       </div>
                     </button>
                   );

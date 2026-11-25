@@ -90,7 +90,7 @@ export const REALM_CATALOG: readonly RealmSpec[] = [
     tagline: 'Corridors · Magnet Shrines · 1.25x',
     unlockBossWave: 5,
     unlockRequirementLabel: 'Defeat W5 Boss',
-    defaultFloorStyle: 'dungeon_circuit',
+    defaultFloorStyle: 'labyrinth_grid',
     accentHex: '#00F0FF',
     arenaWidth: 1800,
     arenaHeight: 1800,

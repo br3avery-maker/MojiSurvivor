@@ -1,3 +1,11 @@
+import {
+  drawArenaPerimeter,
+  drawExpGem,
+  drawMojoCoin,
+  drawPowerUpCrate,
+  drawRealmObstacle,
+  drawRealmPad,
+} from './arenaSprites';
 import { retroAudio } from './audio';
 import { sha256Hex, type EmojiCombatTrait } from './cryptoStats';
 import { getArenaPixelTileCanvas } from './pixelBackgrounds';
@@ -377,6 +385,7 @@ export class MojiSurvivorEngine {
   private lastFlushedMojo = -1;
   private lastFlushedXp = -1;
   private lastFlushedKills = -1;
+  private killsSinceMojoCoin = 0;
 
   // Entities
   private enemies: EnemyEntity[] = [];
@@ -548,6 +557,7 @@ export class MojiSurvivorEngine {
     this.lastFlushedMojo = this.mojoEarned;
     this.lastFlushedXp = this.careerXpEarned;
     this.lastFlushedKills = this.defeated;
+    this.killsSinceMojoCoin = 0;
     this.siphonCooldown = 0;
     this.stationaryTimer = 0;
     this.stationaryAnchor = { x: this.player.x, y: this.player.y };
@@ -1701,6 +1711,20 @@ export class MojiSurvivorEngine {
           this.mojoEarned += boostedMojo;
           this.score += boostedMojo * 15;
           retroAudio.playPickup();
+          if (this.particles.length < 130) {
+            this.particles.push({
+              kind: 'text',
+              x: this.player.x + (Math.random() - 0.5) * 14,
+              y: this.player.y - this.player.radius - 10,
+              vx: 0,
+              vy: -30,
+              radius: 0,
+              text: `+${boostedMojo} MOJO`,
+              color: '#FACC15',
+              life: 0.45,
+              maxLife: 0.45,
+            });
+          }
         }
       }
     }
@@ -1919,32 +1943,65 @@ export class MojiSurvivorEngine {
         });
       }
 
-      // Drop EXP shard and calibrated Mojo bounty (prevents coin-flooding while rewarding Elites/Bosses)
+      // Drop EXP shard and calibrated Mojo Coin bounty (resolved outside obstacles so coins never hide inside walls/pylons)
       const expDrop = enemy.isBoss
         ? 45
         : enemy.isElite
           ? enemy.trait.expValue * 3
           : Math.max(3, Math.round(enemy.trait.expValue * 1.8));
+      const safeExpPos = this.resolveCircleVsObstacles(enemy.x, enemy.y, 10, 24);
       this.orbs.push({
-        x: enemy.x,
-        y: enemy.y,
+        x: safeExpPos.x,
+        y: safeExpPos.y,
         kind: 'exp',
         value: expDrop,
         magnetized: false,
       });
 
-      if (enemy.isBoss || enemy.isElite || Math.random() < 0.22) {
-        this.orbs.push({
-          x: enemy.x + 12,
-          y: enemy.y - 7,
-          kind: 'mojo',
-          value: enemy.isBoss
-            ? 15 * this.realmSpec.bossDropMult
-            : enemy.isElite
-              ? enemy.trait.mojoValue + 1
-              : enemy.trait.mojoValue,
-          magnetized: false,
-        });
+      this.killsSinceMojoCoin += 1;
+      const shouldDropCoin =
+        enemy.isBoss ||
+        enemy.isElite ||
+        this.killsSinceMojoCoin >= 4 ||
+        Math.random() < 0.3;
+
+      if (shouldDropCoin) {
+        this.killsSinceMojoCoin = 0;
+        if (enemy.isBoss) {
+          const totalBossOrb = 15 * this.realmSpec.bossDropMult;
+          const coinCount = 3;
+          const perCoin = Math.max(5, Math.round(totalBossOrb / coinCount));
+          for (let c = 0; c < coinCount; c++) {
+            const ang = (c * Math.PI * 2) / coinCount + 0.4;
+            const safeCoinPos = this.resolveCircleVsObstacles(
+              enemy.x + Math.cos(ang) * 26,
+              enemy.y + Math.sin(ang) * 26,
+              12,
+              24
+            );
+            this.orbs.push({
+              x: safeCoinPos.x,
+              y: safeCoinPos.y,
+              kind: 'mojo',
+              value: perCoin,
+              magnetized: false,
+            });
+          }
+        } else {
+          const safeCoinPos = this.resolveCircleVsObstacles(
+            enemy.x + 14,
+            enemy.y - 8,
+            10,
+            24
+          );
+          this.orbs.push({
+            x: safeCoinPos.x,
+            y: safeCoinPos.y,
+            kind: 'mojo',
+            value: enemy.isElite ? enemy.trait.mojoValue + 1 : enemy.trait.mojoValue,
+            magnetized: false,
+          });
+        }
       }
 
       const burstPalette = ['#FF1493', '#00F0FF', '#A855F7', '#00FF9D'];
@@ -2222,162 +2279,54 @@ export class MojiSurvivorEngine {
       ctx.stroke();
     }
 
-    // Realm Interactive Pads (Magnet Shrines, Warp Runes, Overcharge Nodes)
+    const animTimeSec = performance.now() * 0.001;
+
+    // 16-Bit Pixel-Art Realm Interactive Pads (Magnet Shrines, Warp Runes, Overcharge Nodes)
     for (const pad of this.realmSpec.pads) {
       const cd = this.padCooldowns.get(pad.id) ?? 0;
-      const ready = cd <= 0;
-      ctx.save();
-      const padAccent =
-        pad.kind === 'magnet_shrine'
-          ? '#00F0FF'
-          : pad.kind === 'warp_rune'
-            ? '#C084FC'
-            : '#E2E8F0';
-      ctx.fillStyle =
-        pad.kind === 'overcharge_node' && this.overchargeActive
-          ? 'rgba(0, 240, 255, 0.14)'
-          : ready
-            ? 'rgba(17, 16, 24, 0.72)'
-            : 'rgba(17, 16, 24, 0.45)';
-      ctx.strokeStyle = ready ? padAccent : '#5E5E5E';
-      ctx.lineWidth = ready ? 2.5 : 1.5;
-      if (!ready) ctx.setLineDash([5, 5]);
-      ctx.beginPath();
-      ctx.arc(pad.x, pad.y, pad.radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.setLineDash([]);
-      ctx.fillStyle = ready ? padAccent : '#94A3B8';
-      ctx.font = '700 10px "JetBrains Mono", monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(ready ? pad.label : `${Math.ceil(cd)}s`, pad.x, pad.y);
-      ctx.restore();
+      drawRealmPad(
+        ctx,
+        pad,
+        cd,
+        this.overchargeActive,
+        animTimeSec,
+        this.settings.reducedMotion
+      );
     }
 
-    // Realm Obstacles (Stone Anchor Pylons / Labyrinth Walls / Void Energy Monoliths)
+    // 16-Bit Pixel-Art Realm Obstacles (Forged Pylons, Armored Corridor Walls, Crystal Monoliths, Blast Baffles)
     for (const obs of this.realmSpec.obstacles) {
-      ctx.save();
-      const isEnergy = obs.kind === 'energy';
-      ctx.fillStyle = isEnergy ? 'rgba(30, 16, 53, 0.9)' : '#14141D';
-      ctx.strokeStyle = isEnergy ? '#C084FC' : this.realmSpec.accentHex;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.roundRect(obs.x, obs.y, obs.w, obs.h, 6);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.strokeStyle = isEnergy ? 'rgba(192, 132, 252, 0.35)' : 'rgba(255, 255, 255, 0.12)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(obs.x + 4, obs.y + 4, Math.max(2, obs.w - 8), Math.max(2, obs.h - 8));
-
-      if (obs.label) {
-        ctx.fillStyle = isEnergy ? '#C084FC' : '#94A3B8';
-        ctx.font = '700 9px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(obs.label, obs.x + obs.w / 2, obs.y + obs.h / 2);
-      }
-      ctx.restore();
+      drawRealmObstacle(
+        ctx,
+        obs,
+        this.realmId,
+        animTimeSec,
+        this.settings.reducedMotion
+      );
     }
 
-    // BreBre Colors double-pixel arena boundary (#9A0957 outer frame + realm accent inner barrier)
-    ctx.strokeStyle = '#9A0957';
-    ctx.lineWidth = 5;
-    ctx.strokeRect(-2, -2, this.arenaWidth + 4, this.arenaHeight + 4);
-    ctx.strokeStyle = this.realmSpec.accentHex;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(0, 0, this.arenaWidth, this.arenaHeight);
+    // 16-Bit Armored Arena Perimeter Wall & Glowing Energy Barrier
+    drawArenaPerimeter(ctx, this.arenaWidth, this.arenaHeight, this.realmSpec.accentHex);
 
-    // Pickups: Emerald 4-point XP Gems & Gleaming Gold Mojo Coins (distinct shapes + cool/gold palette)
+    // Pickups: 16-Bit Faceted Emerald XP Crystals & Gleaming Spinning Gold Mojo Coins
     for (const orb of this.orbs) {
-      ctx.save();
       if (orb.kind === 'exp') {
-        // Spring Emerald 4-point crystal gem
-        ctx.fillStyle = '#00FF9D';
-        ctx.strokeStyle = '#059669';
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.moveTo(orb.x, orb.y - 6.5);
-        ctx.lineTo(orb.x + 4.8, orb.y);
-        ctx.lineTo(orb.x, orb.y + 6.5);
-        ctx.lineTo(orb.x - 4.8, orb.y);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-
-        // Crisp inner crystal facet
-        ctx.fillStyle = '#D1FAE5';
-        ctx.beginPath();
-        ctx.moveTo(orb.x, orb.y - 3);
-        ctx.lineTo(orb.x + 2, orb.y);
-        ctx.lineTo(orb.x, orb.y + 3);
-        ctx.lineTo(orb.x - 2, orb.y);
-        ctx.closePath();
-        ctx.fill();
+        drawExpGem(ctx, orb.x, orb.y, orb.value, animTimeSec, this.settings.reducedMotion);
       } else {
-        // Minted Chrome-Silver Mojo Coin with cyan inner ring & vertical bar
-        ctx.fillStyle = '#E2E8F0';
-        ctx.strokeStyle = '#00F0FF';
-        ctx.lineWidth = 1.4;
-        ctx.beginPath();
-        ctx.arc(orb.x, orb.y, 7, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-
-        ctx.strokeStyle = '#1E293B';
-        ctx.lineWidth = 1.3;
-        ctx.beginPath();
-        ctx.arc(orb.x, orb.y, 4.3, 0, Math.PI * 2);
-        ctx.moveTo(orb.x, orb.y - 2.6);
-        ctx.lineTo(orb.x, orb.y + 2.6);
-        ctx.stroke();
+        drawMojoCoin(ctx, orb.x, orb.y, orb.value, animTimeSec, this.settings.reducedMotion);
       }
-      ctx.restore();
     }
 
-    // Power-up crates: 4 distinct color-coded tactical beacons
+    // 16-Bit Pixel-Art Power-Up Supply Pods
     for (const c of this.crates) {
-      ctx.save();
-      const crateColor =
-        c.kind === 'speed'
-          ? '#00F0FF'
-          : c.kind === 'shield'
-            ? '#00FF9D'
-            : c.kind === 'fury'
-              ? '#A855F7'
-              : '#E2E8F0';
-
-      ctx.strokeStyle = crateColor;
-      ctx.globalAlpha = 0.28;
-      ctx.lineWidth = 1.25;
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 19, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#0D0D12';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.roundRect(c.x - 13, c.y - 13, 26, 26, 6);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.fillStyle = crateColor;
-      ctx.font = '700 10px "JetBrains Mono", monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const code =
-        c.kind === 'speed'
-          ? 'SPD'
-          : c.kind === 'shield'
-            ? 'SHD'
-            : c.kind === 'fury'
-              ? 'FRY'
-              : 'MAG';
-      ctx.fillText(code, c.x, c.y + 0.5);
-      ctx.restore();
+      drawPowerUpCrate(
+        ctx,
+        c.x,
+        c.y,
+        c.kind,
+        animTimeSec,
+        this.settings.reducedMotion
+      );
     }
 
     // Telegraphed Target-Lock Mortar Hazard Rings (Crimson Reticle + Countdown Fill)

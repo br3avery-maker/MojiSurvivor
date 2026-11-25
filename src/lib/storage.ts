@@ -111,6 +111,7 @@ export type CodexViewMode = 'gallery' | 'stats';
 export type ArenaBgStyleSetting =
   | 'auto'
   | 'dungeon_circuit'
+  | 'labyrinth_grid'
   | 'citadel_plates'
   | 'starlight_grid';
 
@@ -877,6 +878,7 @@ export function normalizeAndMigrateState(rawObj: unknown): PersistedGameState | 
     emojiFilterMode,
     arenaBgStyle:
       rawSettings.arenaBgStyle === 'dungeon_circuit' ||
+      rawSettings.arenaBgStyle === 'labyrinth_grid' ||
       rawSettings.arenaBgStyle === 'citadel_plates' ||
       rawSettings.arenaBgStyle === 'starlight_grid' ||
       rawSettings.arenaBgStyle === 'auto'
